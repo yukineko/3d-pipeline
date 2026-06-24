@@ -126,18 +126,69 @@ def resolve_image_from_record(record: dict) -> Path:
     sys.exit(1)
 
 
+def resolve_base_vrm_from_record(record: dict) -> Path:
+    """
+    Resolve the base VRM path from a parent ledger record.
+
+    Looks first in ``generation_params`` (a JSON string) for a ``vrm_path``
+    field, then falls back to ``asset_ref`` (a JSON string) for a VRM-like
+    reference. Raises SystemExit with a user-friendly message when no VRM
+    path can be resolved.
+    """
+    # 1. Try generation_params: a JSON string with a vrm_path field
+    gen_params_str = (record.get("generation_params") or "").strip()
+    if gen_params_str and gen_params_str != "{}":
+        try:
+            gen_data = json.loads(gen_params_str)
+            if isinstance(gen_data, dict):
+                vrm_path = gen_data.get("vrm_path")
+                if vrm_path:
+                    return Path(vrm_path).resolve()
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Try asset_ref: a JSON string that may contain a VRM reference
+    asset_ref_str = (record.get("asset_ref") or "").strip()
+    if asset_ref_str and asset_ref_str != "{}":
+        try:
+            asset_data = json.loads(asset_ref_str)
+            if isinstance(asset_data, dict):
+                for key in ("vrm_path", "vrm", "vrm_ref", "asset"):
+                    val = asset_data.get(key)
+                    if val:
+                        return Path(val).resolve()
+        except json.JSONDecodeError:
+            pass
+
+    print(
+        "Error: 親レコードからベースVRMパスを解決できません。\n"
+        "  generation_params.vrm_path もしくは asset_ref のVRM参照が見つかりません。\n"
+        f"  generation_params={gen_params_str!r}  asset_ref={asset_ref_str!r}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def emit_drop(
     out_dir: Path,
     name: str,
     prompt: str,
     parent_id: str,
     image_ref: Path | None = None,
+    vroid_edit: bool = False,
+    base_vrm: Path | None = None,
+    change: str | None = None,
 ) -> None:
     """Write <name>.prompt and <name>.params.json into the drop directory.
 
     If *image_ref* is provided it is written as an absolute-path string under
     the ``image_ref`` key.  When omitted the key is not present (backwards
     compatible with callers that do not pass an image).
+
+    When *vroid_edit* is True, the params additionally carry the VRoid-edit
+    derivation fields ``vroid_edit`` (True), ``base_vrm`` (absolute path string
+    of the parent's VRM) and ``change`` (the raw adjustment instruction). These
+    keys are omitted entirely when *vroid_edit* is False (backwards compatible).
     """
     if not name or "/" in name or "\\" in name or name in (".", ".."):
         raise ValueError(
@@ -148,6 +199,12 @@ def emit_drop(
     params_path = out_dir / f"{name}.params.json"
     prompt_path.write_text(prompt + "\n", encoding="utf-8")
     params: dict = {"parent_id": parent_id}
+    if vroid_edit:
+        params["vroid_edit"] = True
+        if base_vrm is not None:
+            params["base_vrm"] = str(base_vrm.resolve())
+        if change is not None:
+            params["change"] = change
     if image_ref is not None:
         params["image_ref"] = str(image_ref.resolve())
     params_path.write_text(
@@ -189,6 +246,15 @@ def parse_args() -> argparse.Namespace:
         help="Stem for the emitted drop files (required with --emit-drop).",
     )
     parser.add_argument(
+        "--vroid-edit",
+        action="store_true",
+        help=(
+            "VRoid edit derivation mode. Resolves the parent record's base VRM "
+            "and writes vroid_edit/base_vrm/change into the drop params instead "
+            "of rewriting the prompt via Gemini."
+        ),
+    )
+    parser.add_argument(
         "--image",
         type=Path,
         default=None,
@@ -222,7 +288,15 @@ def main() -> None:
         )
         sys.exit(1)
 
-    if args.dry_run:
+    if args.vroid_edit:
+        # VRoid edit mode: do not rewrite the prompt via Gemini; the change is
+        # carried verbatim as the adjustment instruction in the drop params.
+        print(
+            f"BASE: {base_prompt}\nVROID-EDIT CHANGE: {args.change}",
+            file=sys.stderr,
+        )
+        derived = base_prompt
+    elif args.dry_run:
         print(
             f"BASE: {base_prompt}\nCHANGE: {args.change}",
             file=sys.stderr,
@@ -257,10 +331,26 @@ def main() -> None:
                 sys.exit(1)
             image_ref = image_path
         else:
-            # Auto-resolve from the parent record
-            image_ref = resolve_image_from_record(record)
+            # Auto-resolve from the parent record. In vroid-edit mode an image
+            # is optional (only included when --image is explicitly supplied),
+            # so we skip auto-resolution there.
+            if not args.vroid_edit:
+                image_ref = resolve_image_from_record(record)
 
-        emit_drop(args.emit_drop, args.name, derived, args.parent_id, image_ref)
+        if args.vroid_edit:
+            base_vrm = resolve_base_vrm_from_record(record)
+            emit_drop(
+                args.emit_drop,
+                args.name,
+                derived,
+                args.parent_id,
+                image_ref=image_ref,
+                vroid_edit=True,
+                base_vrm=base_vrm,
+                change=args.change,
+            )
+        else:
+            emit_drop(args.emit_drop, args.name, derived, args.parent_id, image_ref)
     elif args.image is not None:
         # --image given but --emit-drop not given: validate existence for consistency
         image_path = args.image.expanduser().resolve()
