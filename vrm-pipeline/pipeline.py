@@ -105,9 +105,19 @@ def _save_state(drop_dir: Path, state: dict):
     state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def _mark_done(drop_dir: Path, state: dict, file_hash: str, record_id: str):
+def _mark_done(drop_dir: Path, state: dict, file_hash: str, record_id: str, stem: str = ""):
     state[file_hash] = {"record_id": record_id, "ts": time.time()}
+    if stem:
+        state[f"stem:{stem}"] = {"record_id": record_id, "ts": time.time()}
     _save_state(drop_dir, state)
+
+
+def _lookup_r0_record_id(drop_dir: Path, state: dict, base_stem: str) -> str | None:
+    """Return record_id for the original R0 VRM identified by base_stem."""
+    entry = state.get(f"stem:{base_stem}")
+    if entry:
+        return entry.get("record_id")
+    return None
 
 
 def _file_hash(path: Path) -> str:
@@ -120,6 +130,38 @@ def _file_hash(path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Ledger operations
 # ---------------------------------------------------------------------------
+
+def _compute_phash_distance(dir_a: Path, dir_b: Path) -> float | None:
+    """Average pHash hamming distance between matching *.webp files in two dirs."""
+    try:
+        import imagehash
+        from PIL import Image
+    except ImportError:
+        return None
+    distances = []
+    for img_file in sorted(dir_a.glob("*.webp")):
+        other = dir_b / img_file.name
+        if not other.exists():
+            continue
+        try:
+            h_a = imagehash.phash(Image.open(img_file))
+            h_b = imagehash.phash(Image.open(other))
+            distances.append(h_a - h_b)
+        except Exception:
+            pass
+    if not distances:
+        return None
+    return sum(distances) / len(distances)
+
+
+def _ledger_update_outcome_phash(db_path: Path, record_id: str, edit_dist: float):
+    cmd = [
+        "ledger", "--db", str(db_path), "update-outcome",
+        "--id", record_id,
+        "--edit-dist-phash", str(edit_dist),
+    ]
+    _run(cmd, "ledger update-outcome")
+
 
 def _ledger_init(db_path: Path):
     cmd = ["ledger", "--db", str(db_path), "init"]
@@ -271,6 +313,32 @@ def handle_vrm(path: Path, args) -> str:
     return record_id
 
 
+def handle_vrm_r1(path: Path, args, state: dict, drop_dir: Path) -> str:
+    """Process <stem>_r1.vrm: render R1, compute R0↔R1 pHash distance, update ledger."""
+    base_stem = path.stem[:-3]  # strip "_r1"
+    print(f"[pipeline] R1 flow: {path.name} (base={base_stem})")
+
+    r0_record_id = _lookup_r0_record_id(drop_dir, state, base_stem)
+    if not r0_record_id:
+        print(f"[pipeline] WARN no R0 record found for stem '{base_stem}', skipping R1", file=sys.stderr)
+        return ""
+
+    r0_dir = Path(args.output_base) / "renders" / base_stem
+    r1_dir = Path(args.output_base) / "renders" / path.stem
+    r1_dir.mkdir(parents=True, exist_ok=True)
+
+    _render_vrm(path, r1_dir, args)
+
+    dist = _compute_phash_distance(r0_dir, r1_dir)
+    if dist is not None:
+        _ledger_update_outcome_phash(args.db_path, r0_record_id, dist)
+        print(f"[pipeline] R1 edit_dist_phash={dist:.4f} -> record {r0_record_id}")
+    else:
+        print(f"[pipeline] WARN could not compute pHash distance (imagehash not available?)", file=sys.stderr)
+
+    return r0_record_id
+
+
 def _enrich_prompt(prompt: str, args) -> str:
     """Call suggest.py to enrich prompt; fall back to original on any failure."""
     if not getattr(args, "enrich_prompt", False):
@@ -391,8 +459,15 @@ def watch_loop(args):
                 continue  # already processed
 
             try:
-                if ext in VRM_EXTS:
+                if ext in VRM_EXTS and path.stem.endswith("_r1"):
+                    record_id = handle_vrm_r1(path, args, state, drop_dir)
+                    if not record_id:
+                        continue
+                elif ext in VRM_EXTS:
                     record_id = handle_vrm(path, args)
+                    _mark_done(drop_dir, state, fhash, record_id, stem=path.stem)
+                    print(f"[pipeline] done: {path.name} -> {record_id}")
+                    continue
                 elif ext == ".prompt":
                     record_id = handle_prompt(path, args)
                 elif ext in MESH_EXTS:
@@ -418,7 +493,11 @@ def watch_loop(args):
 
 def run_once(path: Path, args):
     ext = path.suffix.lower()
-    if ext in VRM_EXTS:
+    if ext in VRM_EXTS and path.stem.endswith("_r1"):
+        drop_dir = path.parent
+        state = _load_state(drop_dir)
+        return handle_vrm_r1(path, args, state, drop_dir)
+    elif ext in VRM_EXTS:
         return handle_vrm(path, args)
     elif ext == ".prompt":
         return handle_prompt(path, args)

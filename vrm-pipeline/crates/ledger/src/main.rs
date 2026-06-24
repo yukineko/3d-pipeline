@@ -14,6 +14,10 @@ fn default_db_path() -> PathBuf {
 #[derive(Parser)]
 #[command(name = "ledger", about = "VRM pipeline record ledger")]
 struct Cli {
+    /// Path to ledger SQLite DB (default: ~/.vrm-pipeline/ledger.db)
+    #[arg(long, global = true)]
+    db: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -87,11 +91,21 @@ enum Commands {
         #[arg(long, default_value_t = 5)]
         top_k: usize,
     },
+
+    /// Update outcome.edit_dist_phash for a record (R0→R1 pHash distance)
+    UpdateOutcome {
+        /// Record ID
+        #[arg(long)]
+        id: String,
+        /// R0→R1 pHash edit distance (average hamming distance across faces)
+        #[arg(long = "edit-dist-phash")]
+        edit_dist_phash: f64,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let db_path = default_db_path();
+    let db_path = cli.db.clone().unwrap_or_else(default_db_path);
 
     match cli.command {
         Commands::Init => {
@@ -167,6 +181,11 @@ fn main() -> Result<()> {
                 serde_json::from_str(&payload).context("tag-json is not valid JSON")?;
             db::set_derived_key(&db_path, &id, "tag", &value)?;
             println!("Saved tags for {id}");
+        }
+
+        Commands::UpdateOutcome { id, edit_dist_phash } => {
+            db::update_outcome_phash(&db_path, &id, edit_dist_phash)?;
+            println!("Updated outcome for {id}: edit_dist_phash={edit_dist_phash}");
         }
 
         Commands::Similar { embed_json, top_k } => {

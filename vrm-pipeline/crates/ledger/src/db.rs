@@ -160,6 +160,29 @@ pub fn all_embeddings(db_path: &std::path::Path) -> Result<Vec<EmbeddingRow>> {
     Ok(out)
 }
 
+pub fn update_outcome_phash(db_path: &std::path::Path, id: &str, edit_dist_phash: f64) -> Result<()> {
+    let conn = open(db_path)?;
+    let outcome: String = conn
+        .query_row(
+            "SELECT outcome FROM records WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("record not found: {id}"))?;
+
+    let mut obj: serde_json::Value =
+        serde_json::from_str(&outcome).unwrap_or(serde_json::json!({}));
+    obj["edit_dist_phash"] = serde_json::json!(edit_dist_phash);
+    let updated = serde_json::to_string(&obj).context("failed to serialize outcome")?;
+
+    conn.execute(
+        "UPDATE records SET outcome = ?1 WHERE id = ?2",
+        params![updated, id],
+    )
+    .context("failed to update outcome")?;
+    Ok(())
+}
+
 pub struct Stats {
     pub total: u64,
     pub adopted: u64,
