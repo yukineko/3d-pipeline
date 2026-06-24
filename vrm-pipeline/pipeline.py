@@ -271,6 +271,28 @@ def handle_vrm(path: Path, args) -> str:
     return record_id
 
 
+def _enrich_prompt(prompt: str, args) -> str:
+    """Call suggest.py to enrich prompt; fall back to original on any failure."""
+    if not getattr(args, "enrich_prompt", False):
+        return prompt
+    cmd = [
+        sys.executable, str(HERE / "suggest.py"),
+        "--prompt", prompt,
+        "--db-path", str(args.db_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            enriched = result.stdout.strip()
+            if enriched:
+                print(f"[pipeline] prompt enriched via suggest.py")
+                return enriched
+        print(f"[pipeline] suggest.py failed (non-fatal), using original prompt", file=sys.stderr)
+    except Exception as exc:
+        print(f"[pipeline] suggest.py error (non-fatal): {exc}", file=sys.stderr)
+    return prompt
+
+
 def handle_prompt(path: Path, args) -> str:
     prompt = path.read_text(encoding="utf-8").strip()
     print(f"[pipeline] Object flow (prompt): {path.name}")
@@ -278,6 +300,7 @@ def handle_prompt(path: Path, args) -> str:
     output_dir = Path(args.output_base) / "renders" / stem
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    prompt = _enrich_prompt(prompt, args)
     gen_params = _generate(prompt, output_dir, args)
     mesh_path = Path(gen_params["output_glb"])
 
@@ -449,6 +472,10 @@ def main():
                         help="Skip embed.py stage")
     parser.add_argument("--no-tag", action="store_true",
                         help="Skip tag.py stage")
+
+    # Prompt enrichment
+    parser.add_argument("--enrich-prompt", action="store_true",
+                        help="Enrich prompts using suggest.py before generation")
 
     # Watch
     parser.add_argument("--interval", type=int, default=3,
