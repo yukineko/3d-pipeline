@@ -9,9 +9,14 @@ CREATE TABLE IF NOT EXISTS records (
     r0_ref            TEXT NOT NULL DEFAULT '',
     r1_ref            TEXT,
     outcome           TEXT NOT NULL DEFAULT '{}',
-    asset_ref         TEXT NOT NULL DEFAULT '{}'
+    asset_ref         TEXT NOT NULL DEFAULT '{}',
+    derived           TEXT NOT NULL DEFAULT '{}'
 );
 "#;
+
+// Idempotent migration: add derived column to existing DBs created before schema v2.
+pub const MIGRATE_V2_SQL: &str =
+    "ALTER TABLE records ADD COLUMN derived TEXT NOT NULL DEFAULT '{}';";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Record {
@@ -23,4 +28,5 @@ pub struct Record {
     pub r1_ref: Option<String>,
     pub outcome: String,
     pub asset_ref: String,
+    pub derived: String,
 }

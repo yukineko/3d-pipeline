@@ -3,7 +3,7 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use uuid::Uuid;
 
-use crate::schema::{CREATE_TABLE_SQL, Record};
+use crate::schema::{CREATE_TABLE_SQL, MIGRATE_V2_SQL, Record};
 
 pub fn open(db_path: &std::path::Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
@@ -19,6 +19,8 @@ pub fn init(db_path: &std::path::Path) -> Result<()> {
     let conn = open(db_path)?;
     conn.execute_batch(CREATE_TABLE_SQL)
         .context("failed to create table")?;
+    // Idempotent migration: ignore error if column already exists.
+    let _ = conn.execute_batch(MIGRATE_V2_SQL);
     Ok(())
 }
 
@@ -69,7 +71,7 @@ pub fn list_records(db_path: &std::path::Path, limit: u32) -> Result<Vec<Record>
     let conn = open(db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref \
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived \
              FROM records ORDER BY timestamp DESC LIMIT ?1",
         )
         .context("failed to prepare statement")?;
@@ -85,6 +87,7 @@ pub fn list_records(db_path: &std::path::Path, limit: u32) -> Result<Vec<Record>
                 r1_ref: row.get(5)?,
                 outcome: row.get(6)?,
                 asset_ref: row.get(7)?,
+                derived: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "{}".to_string()),
             })
         })
         .context("failed to query records")?;
