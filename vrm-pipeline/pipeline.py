@@ -216,6 +216,7 @@ def _ledger_insert(
     r0_dir: str,
     generation_params: dict,
     parent_id: str | None = None,
+    image_ref: str | None = None,
 ) -> str:
     cmd = [
         "ledger", "--db", str(db_path), "insert",
@@ -225,6 +226,8 @@ def _ledger_insert(
     ]
     if parent_id:
         cmd += ["--parent-id", parent_id]
+    if image_ref:
+        cmd += ["--image-ref", image_ref]
     out, err, rc = _run(cmd, "ledger insert")
     if rc != 0:
         raise RuntimeError(f"ledger insert failed: {err}")
@@ -234,6 +237,11 @@ def _ledger_insert(
 def _pop_parent_id(params: dict) -> str | None:
     """Pull parent_id out of merged params so it rides as a lineage link, not a gen param."""
     return params.pop("parent_id", None)
+
+
+def _pop_image_ref(params: dict) -> str | None:
+    """Pull image_ref out of merged params so it rides as a dedicated column, not a gen param."""
+    return params.pop("image_ref", None)
 
 
 def _ledger_embed(db_path: Path, record_id: str, embed_json: Path):
@@ -284,7 +292,7 @@ def _render_object(mesh_path: Path, output_dir: Path, args) -> dict:
     return _extract_json(out)
 
 
-def _generate(prompt: str, output_dir: Path, args) -> dict:
+def _generate(prompt: str, output_dir: Path, args, image_ref: str | None = None) -> dict:
     glb_output_dir = output_dir / "generated"
     glb_output_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -295,6 +303,9 @@ def _generate(prompt: str, output_dir: Path, args) -> dict:
         "--blender-path", args.blender_path,
         "--model", args.gen_model,
     ]
+    if image_ref:
+        # Image-driven generation: generate.py routes through the Hyper3D backend.
+        cmd += ["--image", image_ref]
     out, err, rc = _run(cmd, "generate.py")
     if rc != 0:
         raise RuntimeError(f"generate.py failed (exit {rc})")
@@ -437,19 +448,41 @@ def handle_prompt(path: Path, args) -> str:
     output_dir = Path(args.output_base) / "renders" / stem
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    parent_id = _pop_parent_id(_read_sidecar_params(path))
+    sidecar_params = _read_sidecar_params(path)
+    parent_id = _pop_parent_id(sidecar_params)
+    image_ref = _pop_image_ref(sidecar_params)
     prompt = _enrich_prompt(prompt, args)
-    gen_params = _generate(prompt, output_dir, args)
-    mesh_path = Path(gen_params["output_glb"])
 
-    summary = _render_object(mesh_path, output_dir, args)
-    gen_params.update({
-        "asset_type": "object",
-        "blender_version": summary.get("blender_version"),
-        "render_sha256": summary.get("render_sha256"),
-    })
+    if image_ref:
+        # Image-derived VRM flow: Hyper3D image-to-3D → GLB → VRM conversion.
+        gen_params = _generate(prompt, output_dir, args, image_ref=image_ref)
+        glb_path = Path(gen_params["output_glb"])
+        vrm_path = output_dir / "generated" / f"{stem}.vrm"
+        from render.vrm_convert import glb_to_vrm  # lazy: avoids bpy import at module load
+        glb_to_vrm(glb_path, vrm_path, blender_path=args.blender_path)
+        print(f"[pipeline] converted GLB -> VRM: {vrm_path}")
 
-    record_id = _ledger_insert(args.db_path, prompt, str(output_dir), gen_params, parent_id)
+        summary = _render_vrm(vrm_path, output_dir, args)
+        gen_params.update({
+            "asset_type": "vrm",
+            "vrm_path": str(vrm_path),
+            "blender_version": summary.get("blender_version"),
+            "render_sha256": summary.get("render_sha256"),
+        })
+    else:
+        gen_params = _generate(prompt, output_dir, args)
+        mesh_path = Path(gen_params["output_glb"])
+
+        summary = _render_object(mesh_path, output_dir, args)
+        gen_params.update({
+            "asset_type": "object",
+            "blender_version": summary.get("blender_version"),
+            "render_sha256": summary.get("render_sha256"),
+        })
+
+    record_id = _ledger_insert(
+        args.db_path, prompt, str(output_dir), gen_params, parent_id, image_ref
+    )
     print(f"[pipeline] ledger record: {record_id}")
 
     _post_process(record_id, output_dir, args)
