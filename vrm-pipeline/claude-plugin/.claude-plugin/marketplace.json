@@ -1,0 +1,11 @@
+{
+  "name": "vrm-pipeline",
+  "owner": { "name": "Nakayama Hiroyuki" },
+  "plugins": [
+    {
+      "name": "vrm-pipeline",
+      "source": "./",
+      "description": "Slash commands wrapping the VRM pipeline CLIs (dist, ledger, vrm-watch)"
+    }
+  ]
+}
