@@ -51,7 +51,11 @@ FACE_NAMES = [
 
 def _run(cmd, label=""):
     """Run subprocess, return (stdout, stderr, returncode)."""
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except (FileNotFoundError, OSError) as exc:
+        print(f"[calibrate] WARN {label} could not launch: {exc}", file=sys.stderr)
+        return "", str(exc), 1
     if result.returncode != 0:
         print(f"[calibrate] WARN {label} exit={result.returncode}", file=sys.stderr)
         if result.stderr:
