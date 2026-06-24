@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+.eggs
+*.egg
+.pytest_cache
+.coverage
+htmlcov
+coverage_html
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv
+.venv
+env
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+*.tar.gz
+dist
+build
+
+# Docker
+docker-compose.override.yml
+
+# Local config
+.env
+*.local
+
+# Deprecated
+_deprecated
