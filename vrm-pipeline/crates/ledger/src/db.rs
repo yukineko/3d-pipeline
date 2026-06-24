@@ -99,6 +99,67 @@ pub fn list_records(db_path: &std::path::Path, limit: u32) -> Result<Vec<Record>
     Ok(records)
 }
 
+pub fn set_derived_key(
+    db_path: &std::path::Path,
+    id: &str,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<()> {
+    let conn = open(db_path)?;
+    let raw: String = conn
+        .query_row(
+            "SELECT derived FROM records WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .with_context(|| format!("record not found: {id}"))?
+        .unwrap_or_else(|| "{}".to_string());
+
+    let mut obj: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+    obj[key] = value.clone();
+    let updated = serde_json::to_string(&obj).context("serialize derived")?;
+
+    conn.execute(
+        "UPDATE records SET derived = ?1 WHERE id = ?2",
+        params![updated, id],
+    )
+    .context("failed to update derived")?;
+    Ok(())
+}
+
+pub struct EmbeddingRow {
+    pub id: String,
+    pub vec: Vec<f64>,
+}
+
+pub fn all_embeddings(db_path: &std::path::Path) -> Result<Vec<EmbeddingRow>> {
+    let conn = open(db_path)?;
+    let mut stmt = conn
+        .prepare("SELECT id, derived FROM records")
+        .context("prepare all_embeddings")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .context("query all_embeddings")?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, raw) = row.context("read row")?;
+        let derived_str = raw.unwrap_or_else(|| "{}".to_string());
+        let derived: serde_json::Value =
+            serde_json::from_str(&derived_str).unwrap_or(serde_json::json!({}));
+        if let Some(arr) = derived["embed"]["record_embedding"].as_array() {
+            let vec: Vec<f64> = arr.iter().filter_map(|v| v.as_f64()).collect();
+            if !vec.is_empty() {
+                out.push(EmbeddingRow { id, vec });
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub struct Stats {
     pub total: u64,
     pub adopted: u64,
@@ -213,6 +274,56 @@ mod tests {
         init(&db_path).unwrap();
         let records = list_records(&db_path, 20).unwrap();
         assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_set_derived_key_stores_and_updates() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let id = insert(&db_path, "embed-test", "", "{}", "{}").unwrap();
+
+        let v1 = serde_json::json!({"record_embedding": [1.0, 2.0]});
+        set_derived_key(&db_path, &id, "embed", &v1).unwrap();
+
+        let records = list_records(&db_path, 10).unwrap();
+        let derived: serde_json::Value = serde_json::from_str(&records[0].derived).unwrap();
+        assert_eq!(derived["embed"]["record_embedding"][0], 1.0);
+
+        // second key must not overwrite first
+        let tags = serde_json::json!({"hair_color": "blue"});
+        set_derived_key(&db_path, &id, "tag", &tags).unwrap();
+
+        let records2 = list_records(&db_path, 10).unwrap();
+        let d2: serde_json::Value = serde_json::from_str(&records2[0].derived).unwrap();
+        assert_eq!(d2["embed"]["record_embedding"][0], 1.0);
+        assert_eq!(d2["tag"]["hair_color"], "blue");
+    }
+
+    #[test]
+    fn test_set_derived_key_unknown_id_errors() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let v = serde_json::json!({});
+        let result = set_derived_key(&db_path, "no-such-id", "embed", &v);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_all_embeddings_returns_rows_with_embed() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let id1 = insert(&db_path, "a", "", "{}", "{}").unwrap();
+        let id2 = insert(&db_path, "b", "", "{}", "{}").unwrap();
+
+        let v = serde_json::json!({"record_embedding": [0.1, 0.2, 0.3]});
+        set_derived_key(&db_path, &id1, "embed", &v).unwrap();
+        // id2 has no embed
+
+        let rows = all_embeddings(&db_path).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id1);
+        assert_eq!(rows[0].vec, vec![0.1, 0.2, 0.3]);
+        let _ = id2;
     }
 
     #[test]

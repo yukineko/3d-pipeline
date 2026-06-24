@@ -1,7 +1,8 @@
 mod db;
 mod schema;
+mod search;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -56,6 +57,36 @@ enum Commands {
 
     /// Show statistics
     Stats,
+
+    /// Store embedding vector (from embed.py output) into derived.embed
+    Embed {
+        /// Record ID
+        #[arg(long)]
+        id: String,
+        /// Path to embed.json produced by embed.py
+        #[arg(long = "embed-json")]
+        embed_json: PathBuf,
+    },
+
+    /// Store VLM tags (from tag.py output) into derived.tag
+    Tag {
+        /// Record ID
+        #[arg(long)]
+        id: String,
+        /// Path to tags.json produced by tag.py
+        #[arg(long = "tag-json")]
+        tag_json: PathBuf,
+    },
+
+    /// Find similar records by cosine similarity of stored embeddings
+    Similar {
+        /// Path to embed.json to use as query
+        #[arg(long = "embed-json")]
+        embed_json: PathBuf,
+        /// Number of top results to return
+        #[arg(long, default_value_t = 5)]
+        top_k: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -117,6 +148,44 @@ fn main() -> Result<()> {
             match s.avg_edit_dist {
                 Some(avg) => println!("Avg edit dist  : {avg:.4}"),
                 None => println!("Avg edit dist  : N/A"),
+            }
+        }
+
+        Commands::Embed { id, embed_json } => {
+            let payload = std::fs::read_to_string(&embed_json)
+                .with_context(|| format!("cannot read {}", embed_json.display()))?;
+            let value: serde_json::Value =
+                serde_json::from_str(&payload).context("embed-json is not valid JSON")?;
+            db::set_derived_key(&db_path, &id, "embed", &value)?;
+            println!("Saved embedding for {id}");
+        }
+
+        Commands::Tag { id, tag_json } => {
+            let payload = std::fs::read_to_string(&tag_json)
+                .with_context(|| format!("cannot read {}", tag_json.display()))?;
+            let value: serde_json::Value =
+                serde_json::from_str(&payload).context("tag-json is not valid JSON")?;
+            db::set_derived_key(&db_path, &id, "tag", &value)?;
+            println!("Saved tags for {id}");
+        }
+
+        Commands::Similar { embed_json, top_k } => {
+            let payload = std::fs::read_to_string(&embed_json)
+                .with_context(|| format!("cannot read {}", embed_json.display()))?;
+            let query: serde_json::Value =
+                serde_json::from_str(&payload).context("embed-json is not valid JSON")?;
+            let query_vec = query["record_embedding"]
+                .as_array()
+                .context("embed-json missing record_embedding array")?
+                .iter()
+                .filter_map(|v| v.as_f64())
+                .collect::<Vec<_>>();
+
+            let all = db::all_embeddings(&db_path)?;
+            let mut results = search::top_k_similar(&query_vec, &all, top_k);
+            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+            for r in &results {
+                println!("{:.4}  {}", r.score, r.id);
             }
         }
     }
