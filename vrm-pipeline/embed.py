@@ -30,7 +30,7 @@ ALL_FACES = [
 
 MODEL_CONFIG = {
     "dinov2-small": {
-        "hf_id": "facebook/dinov2-small",
+        "hf_id": "facebook/dinov2-base",
         "dim": 768,
     },
     "clip": {
