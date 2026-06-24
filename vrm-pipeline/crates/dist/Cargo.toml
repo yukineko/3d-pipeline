@@ -1,0 +1,24 @@
+[package]
+name = "dist"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dist"
+path = "src/main.rs"
+
+[lib]
+name = "dist"
+path = "src/lib.rs"
+
+[dependencies]
+image = "0.25"
+img_hash = "3"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
