@@ -85,8 +85,60 @@ def derive_prompt(base: str, change: str, model_name: str) -> str:
     return response.text.strip()
 
 
-def emit_drop(out_dir: Path, name: str, prompt: str, parent_id: str) -> None:
-    """Write <name>.prompt and <name>.params.json into the drop directory."""
+def resolve_image_from_record(record: dict) -> Path:
+    """
+    Resolve a render image path from a parent ledger record.
+
+    Looks first in the r0_ref render directory for *.webp or *.png files,
+    then falls back to asset_ref JSON fields. Raises SystemExit with a
+    user-friendly message when no image can be resolved.
+    """
+    # 1. Try r0_ref: the render output directory
+    r0_ref = (record.get("r0_ref") or "").strip()
+    if r0_ref:
+        r0_dir = Path(r0_ref)
+        if r0_dir.is_dir():
+            for ext in ("*.webp", "*.png"):
+                candidates = sorted(r0_dir.glob(ext))
+                if candidates:
+                    return candidates[0].resolve()
+
+    # 2. Try asset_ref: a JSON string that may contain image paths
+    asset_ref_str = (record.get("asset_ref") or "").strip()
+    if asset_ref_str and asset_ref_str != "{}":
+        try:
+            asset_data = json.loads(asset_ref_str)
+            if isinstance(asset_data, dict):
+                for key in ("image", "render", "thumbnail", "preview"):
+                    val = asset_data.get(key)
+                    if val:
+                        p = Path(val)
+                        if p.is_file():
+                            return p.resolve()
+        except json.JSONDecodeError:
+            pass
+
+    print(
+        "Error: 親レコードから画像を解決できません。--image を指定してください。\n"
+        f"  r0_ref={r0_ref!r}  asset_ref={asset_ref_str!r}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def emit_drop(
+    out_dir: Path,
+    name: str,
+    prompt: str,
+    parent_id: str,
+    image_ref: Path | None = None,
+) -> None:
+    """Write <name>.prompt and <name>.params.json into the drop directory.
+
+    If *image_ref* is provided it is written as an absolute-path string under
+    the ``image_ref`` key.  When omitted the key is not present (backwards
+    compatible with callers that do not pass an image).
+    """
     if not name or "/" in name or "\\" in name or name in (".", ".."):
         raise ValueError(
             f"invalid --name '{name}': must be a plain file stem (no path separators)"
@@ -95,8 +147,11 @@ def emit_drop(out_dir: Path, name: str, prompt: str, parent_id: str) -> None:
     prompt_path = out_dir / f"{name}.prompt"
     params_path = out_dir / f"{name}.params.json"
     prompt_path.write_text(prompt + "\n", encoding="utf-8")
+    params: dict = {"parent_id": parent_id}
+    if image_ref is not None:
+        params["image_ref"] = str(image_ref.resolve())
     params_path.write_text(
-        json.dumps({"parent_id": parent_id}, ensure_ascii=False) + "\n",
+        json.dumps(params, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     print(f"Wrote {prompt_path} and {params_path}", file=sys.stderr)
@@ -132,6 +187,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--name",
         help="Stem for the emitted drop files (required with --emit-drop).",
+    )
+    parser.add_argument(
+        "--image",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a render image to include as image_ref in the drop params. "
+            "When omitted with --emit-drop, the path is resolved from the parent "
+            "record's r0_ref render directory automatically."
+        ),
     )
     return parser.parse_args()
 
@@ -179,7 +244,32 @@ def main() -> None:
         derived = derive_prompt(base_prompt, args.change, args.model)
 
     if args.emit_drop:
-        emit_drop(args.emit_drop, args.name, derived, args.parent_id)
+        # Resolve image_ref for the drop params
+        image_ref: Path | None = None
+        if args.image is not None:
+            # --image was explicitly supplied: validate it exists
+            image_path = args.image.expanduser().resolve()
+            if not image_path.is_file():
+                print(
+                    f"Error: --image file not found: '{image_path}'",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            image_ref = image_path
+        else:
+            # Auto-resolve from the parent record
+            image_ref = resolve_image_from_record(record)
+
+        emit_drop(args.emit_drop, args.name, derived, args.parent_id, image_ref)
+    elif args.image is not None:
+        # --image given but --emit-drop not given: validate existence for consistency
+        image_path = args.image.expanduser().resolve()
+        if not image_path.is_file():
+            print(
+                f"Error: --image file not found: '{image_path}'",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     print(derived)
 
