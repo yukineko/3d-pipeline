@@ -3,3 +3,4 @@ numpy>=1.24.0
 Pillow>=10.0.0
 torch>=2.1.0
 transformers>=4.40.0
+anthropic>=0.40.0
