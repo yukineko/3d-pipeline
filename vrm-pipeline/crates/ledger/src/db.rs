@@ -3,7 +3,7 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use uuid::Uuid;
 
-use crate::schema::{CREATE_TABLE_SQL, MIGRATE_V2_SQL, Record};
+use crate::schema::{CREATE_TABLE_SQL, MIGRATE_V2_SQL, MIGRATE_V3_SQL, Record};
 
 pub fn open(db_path: &std::path::Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
@@ -19,8 +19,9 @@ pub fn init(db_path: &std::path::Path) -> Result<()> {
     let conn = open(db_path)?;
     conn.execute_batch(CREATE_TABLE_SQL)
         .context("failed to create table")?;
-    // Idempotent migration: ignore error if column already exists.
+    // Idempotent migrations: ignore error if column already exists.
     let _ = conn.execute_batch(MIGRATE_V2_SQL);
+    let _ = conn.execute_batch(MIGRATE_V3_SQL);
     Ok(())
 }
 
@@ -30,17 +31,66 @@ pub fn insert(
     r0_ref: &str,
     generation_params: &str,
     asset_ref: &str,
+    parent_id: Option<&str>,
 ) -> Result<String> {
     let conn = open(db_path)?;
     let id = Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO records (id, timestamp, prompt, generation_params, r0_ref, asset_ref) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![id, timestamp, prompt, generation_params, r0_ref, asset_ref],
+        "INSERT INTO records (id, timestamp, prompt, generation_params, r0_ref, asset_ref, parent_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, timestamp, prompt, generation_params, r0_ref, asset_ref, parent_id],
     )
     .context("failed to insert record")?;
     Ok(id)
+}
+
+/// Fetch a single record by id.
+pub fn get_record(db_path: &std::path::Path, id: &str) -> Result<Record> {
+    let conn = open(db_path)?;
+    let record = conn
+        .query_row(
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id \
+             FROM records WHERE id = ?1",
+            params![id],
+            row_to_record,
+        )
+        .with_context(|| format!("record not found: {id}"))?;
+    Ok(record)
+}
+
+/// All records, oldest first — convenient for building a lineage tree.
+pub fn all_records(db_path: &std::path::Path) -> Result<Vec<Record>> {
+    let conn = open(db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id \
+             FROM records ORDER BY timestamp ASC",
+        )
+        .context("failed to prepare statement")?;
+    let rows = stmt
+        .query_map([], row_to_record)
+        .context("failed to query records")?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.context("failed to read row")?);
+    }
+    Ok(records)
+}
+
+fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<Record> {
+    Ok(Record {
+        id: row.get(0)?,
+        timestamp: row.get(1)?,
+        prompt: row.get(2)?,
+        generation_params: row.get(3)?,
+        r0_ref: row.get(4)?,
+        r1_ref: row.get(5)?,
+        outcome: row.get(6)?,
+        asset_ref: row.get(7)?,
+        derived: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "{}".to_string()),
+        parent_id: row.get(9)?,
+    })
 }
 
 pub fn adopt(db_path: &std::path::Path, id: &str) -> Result<()> {
@@ -71,25 +121,13 @@ pub fn list_records(db_path: &std::path::Path, limit: u32) -> Result<Vec<Record>
     let conn = open(db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived \
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id \
              FROM records ORDER BY timestamp DESC LIMIT ?1",
         )
         .context("failed to prepare statement")?;
 
     let rows = stmt
-        .query_map(params![limit], |row| {
-            Ok(Record {
-                id: row.get(0)?,
-                timestamp: row.get(1)?,
-                prompt: row.get(2)?,
-                generation_params: row.get(3)?,
-                r0_ref: row.get(4)?,
-                r1_ref: row.get(5)?,
-                outcome: row.get(6)?,
-                asset_ref: row.get(7)?,
-                derived: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "{}".to_string()),
-            })
-        })
+        .query_map(params![limit], row_to_record)
         .context("failed to query records")?;
 
     let mut records = Vec::new();
@@ -324,7 +362,7 @@ mod tests {
     fn test_insert_creates_record() {
         let (_dir, db_path) = temp_db();
         init(&db_path).unwrap();
-        let id = insert(&db_path, "hello", "/tmp/r0", "{}", "{}").unwrap();
+        let id = insert(&db_path, "hello", "/tmp/r0", "{}", "{}", None).unwrap();
         assert!(!id.is_empty());
 
         let records = list_records(&db_path, 10).unwrap();
@@ -335,10 +373,24 @@ mod tests {
     }
 
     #[test]
+    fn test_insert_with_parent_and_get_record() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let root = insert(&db_path, "chair", "", "{}", "{}", None).unwrap();
+        let child = insert(&db_path, "chair v2", "", "{}", "{}", Some(&root)).unwrap();
+
+        let r = get_record(&db_path, &child).unwrap();
+        assert_eq!(r.parent_id.as_deref(), Some(root.as_str()));
+
+        let root_rec = get_record(&db_path, &root).unwrap();
+        assert_eq!(root_rec.parent_id, None);
+    }
+
+    #[test]
     fn test_adopt_sets_adopted_true() {
         let (_dir, db_path) = temp_db();
         init(&db_path).unwrap();
-        let id = insert(&db_path, "adopt-test", "", "{}", "{}").unwrap();
+        let id = insert(&db_path, "adopt-test", "", "{}", "{}", None).unwrap();
         adopt(&db_path, &id).unwrap();
 
         let records = list_records(&db_path, 10).unwrap();
@@ -360,7 +412,7 @@ mod tests {
     fn test_set_derived_key_stores_and_updates() {
         let (_dir, db_path) = temp_db();
         init(&db_path).unwrap();
-        let id = insert(&db_path, "embed-test", "", "{}", "{}").unwrap();
+        let id = insert(&db_path, "embed-test", "", "{}", "{}", None).unwrap();
 
         let v1 = serde_json::json!({"record_embedding": [1.0, 2.0]});
         set_derived_key(&db_path, &id, "embed", &v1).unwrap();
@@ -392,8 +444,8 @@ mod tests {
     fn test_all_embeddings_returns_rows_with_embed() {
         let (_dir, db_path) = temp_db();
         init(&db_path).unwrap();
-        let id1 = insert(&db_path, "a", "", "{}", "{}").unwrap();
-        let id2 = insert(&db_path, "b", "", "{}", "{}").unwrap();
+        let id1 = insert(&db_path, "a", "", "{}", "{}", None).unwrap();
+        let id2 = insert(&db_path, "b", "", "{}", "{}", None).unwrap();
 
         let v = serde_json::json!({"record_embedding": [0.1, 0.2, 0.3]});
         set_derived_key(&db_path, &id1, "embed", &v).unwrap();

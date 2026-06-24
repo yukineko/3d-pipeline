@@ -141,11 +141,31 @@ blender --background --python render.py -- \
 
 ```
 ledger init
-ledger insert --prompt <text> [--r0-dir <dir>] [--generation-params <json>]
+ledger insert --prompt <text> [--r0-dir <dir>] [--generation-params <json>] [--parent-id <id>]
 ledger adopt <id>
 ledger list [--limit 20]
 ledger stats
+ledger get --id <id>            レコードを JSON で表示
+ledger tree [--root <id>]       派生系統を樹形図で表示（--root で部分木のみ）
 ```
+
+### derive.py — 既存レコードを起点にした派生生成
+
+既存レコードの prompt を起点に、変更指示を Gemini で適用して新しい prompt を作る。
+生成された子レコードは `--parent-id` で親に紐づくため、`ledger tree` に系統が残る。
+
+```
+# 派生プロンプトを標準出力に表示
+python derive.py --parent-id <id> --change "脚を金属製に、座面を赤革に" \
+  [--db-path ~/.vrm-pipeline/ledger.db] [--model gemini-2.5-flash] [--dry-run]
+
+# drop-zone 用の <name>.prompt + <name>.params.json（parent_id 入り）を書き出す
+python derive.py --parent-id <id> --change "脚を金属製に" \
+  --emit-drop ./drop --name chair_v2
+```
+
+`pipeline.py` は `<stem>.params.json` の `parent_id` を読み取り、INSERT 時に親へリンクする。
+つまり「起点を選んで変更 → 生成 → 系統が樹形図になる」が成立する。
 
 ### dist
 

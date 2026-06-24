@@ -44,6 +44,24 @@ enum Commands {
         /// Asset reference as JSON
         #[arg(long = "asset-ref", default_value = "{}")]
         asset_ref: String,
+
+        /// id of the record this one is derived from (lineage parent)
+        #[arg(long = "parent-id")]
+        parent_id: Option<String>,
+    },
+
+    /// Print a single record as JSON
+    Get {
+        /// Record ID
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Print the derivation lineage as an ASCII tree
+    Tree {
+        /// Show only the subtree rooted at this record ID (default: whole forest)
+        #[arg(long)]
+        root: Option<String>,
     },
 
     /// Mark a record as adopted
@@ -138,10 +156,28 @@ fn main() -> Result<()> {
             r0_dir,
             generation_params,
             asset_ref,
+            parent_id,
         } => {
             let r0_ref = r0_dir.unwrap_or_default();
-            let id = db::insert(&db_path, &prompt, &r0_ref, &generation_params, &asset_ref)?;
+            let id = db::insert(
+                &db_path,
+                &prompt,
+                &r0_ref,
+                &generation_params,
+                &asset_ref,
+                parent_id.as_deref(),
+            )?;
             println!("{id}");
+        }
+
+        Commands::Get { id } => {
+            let record = db::get_record(&db_path, &id)?;
+            println!("{}", serde_json::to_string_pretty(&record)?);
+        }
+
+        Commands::Tree { root } => {
+            let records = db::all_records(&db_path)?;
+            print_tree(&records, root.as_deref());
         }
 
         Commands::Adopt { id } => {
@@ -254,4 +290,73 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Render records as an ASCII derivation tree. Roots are records whose parent_id
+/// is absent (or points outside the set). With `root`, only that subtree prints.
+fn print_tree(records: &[schema::Record], root: Option<&str>) {
+    use std::collections::{HashMap, HashSet};
+
+    let ids: HashSet<&str> = records.iter().map(|r| r.id.as_str()).collect();
+    let mut children: HashMap<&str, Vec<&schema::Record>> = HashMap::new();
+    let mut roots: Vec<&schema::Record> = Vec::new();
+    for r in records {
+        match r.parent_id.as_deref() {
+            Some(pid) if ids.contains(pid) => children.entry(pid).or_default().push(r),
+            _ => roots.push(r),
+        }
+    }
+
+    if let Some(root_id) = root {
+        match records.iter().find(|r| r.id == root_id) {
+            Some(r) => walk(r, "", true, true, &children),
+            None => eprintln!("No record found with id {root_id}"),
+        }
+        return;
+    }
+
+    if roots.is_empty() {
+        println!("No records found.");
+        return;
+    }
+    for r in &roots {
+        walk(r, "", true, true, &children);
+    }
+}
+
+fn walk(
+    r: &schema::Record,
+    prefix: &str,
+    is_root: bool,
+    is_last: bool,
+    children: &std::collections::HashMap<&str, Vec<&schema::Record>>,
+) {
+    let connector = if is_root {
+        ""
+    } else if is_last {
+        "└─ "
+    } else {
+        "├─ "
+    };
+    let prompt = r.prompt.replace('\n', " ");
+    let prompt_short = if prompt.chars().count() > 50 {
+        format!("{}…", prompt.chars().take(50).collect::<String>())
+    } else {
+        prompt
+    };
+    let short_id = r.id.get(..8).unwrap_or(&r.id);
+    println!("{prefix}{connector}{short_id}  {prompt_short}");
+
+    if let Some(kids) = children.get(r.id.as_str()) {
+        let child_prefix = if is_root {
+            String::new()
+        } else if is_last {
+            format!("{prefix}   ")
+        } else {
+            format!("{prefix}│  ")
+        };
+        for (i, c) in kids.iter().enumerate() {
+            walk(c, &child_prefix, false, i == kids.len() - 1, children);
+        }
+    }
 }

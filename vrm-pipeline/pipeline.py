@@ -210,17 +210,30 @@ def _ledger_init(db_path: Path):
         raise RuntimeError(f"ledger init failed: {err}")
 
 
-def _ledger_insert(db_path: Path, prompt: str, r0_dir: str, generation_params: dict) -> str:
+def _ledger_insert(
+    db_path: Path,
+    prompt: str,
+    r0_dir: str,
+    generation_params: dict,
+    parent_id: str | None = None,
+) -> str:
     cmd = [
         "ledger", "--db", str(db_path), "insert",
         "--prompt", prompt,
         "--r0-dir", r0_dir,
         "--generation-params", json.dumps(generation_params),
     ]
+    if parent_id:
+        cmd += ["--parent-id", parent_id]
     out, err, rc = _run(cmd, "ledger insert")
     if rc != 0:
         raise RuntimeError(f"ledger insert failed: {err}")
     return out.strip()
+
+
+def _pop_parent_id(params: dict) -> str | None:
+    """Pull parent_id out of merged params so it rides as a lineage link, not a gen param."""
+    return params.pop("parent_id", None)
 
 
 def _ledger_embed(db_path: Path, record_id: str, embed_json: Path):
@@ -345,8 +358,9 @@ def handle_vrm(path: Path, args) -> str:
         "render_sha256": summary.get("render_sha256"),
         **extra_params,
     }
+    parent_id = _pop_parent_id(gen_params)
 
-    record_id = _ledger_insert(args.db_path, prompt, str(output_dir), gen_params)
+    record_id = _ledger_insert(args.db_path, prompt, str(output_dir), gen_params, parent_id)
     print(f"[pipeline] ledger record: {record_id}")
 
     _post_process(record_id, output_dir, args)
@@ -423,6 +437,7 @@ def handle_prompt(path: Path, args) -> str:
     output_dir = Path(args.output_base) / "renders" / stem
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    parent_id = _pop_parent_id(_read_sidecar_params(path))
     prompt = _enrich_prompt(prompt, args)
     gen_params = _generate(prompt, output_dir, args)
     mesh_path = Path(gen_params["output_glb"])
@@ -434,7 +449,7 @@ def handle_prompt(path: Path, args) -> str:
         "render_sha256": summary.get("render_sha256"),
     })
 
-    record_id = _ledger_insert(args.db_path, prompt, str(output_dir), gen_params)
+    record_id = _ledger_insert(args.db_path, prompt, str(output_dir), gen_params, parent_id)
     print(f"[pipeline] ledger record: {record_id}")
 
     _post_process(record_id, output_dir, args)
@@ -458,8 +473,9 @@ def handle_mesh(path: Path, args) -> str:
         "render_sha256": summary.get("render_sha256"),
         **extra_params,
     }
+    parent_id = _pop_parent_id(gen_params)
 
-    record_id = _ledger_insert(args.db_path, prompt, str(output_dir), gen_params)
+    record_id = _ledger_insert(args.db_path, prompt, str(output_dir), gen_params, parent_id)
     print(f"[pipeline] ledger record: {record_id}")
 
     _post_process(record_id, output_dir, args)
