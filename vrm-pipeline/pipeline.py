@@ -1,0 +1,469 @@
+#!/usr/bin/env python3
+"""
+pipeline.py — Drop-zone watcher → generate → render → ledger
+
+Trigger files in --drop-dir:
+  *.vrm             → VRM pipeline: render/vrm.py → ledger → embed → tag
+  *.prompt          → Object pipeline: generate.py → render/object.py → ledger → embed → tag
+  *.glb *.gltf *.obj *.fbx *.blend
+                    → Object render: render/object.py → ledger → embed → tag
+
+Sidecar conventions:
+  <stem>.prompt     next to *.vrm or mesh files overrides the prompt text
+  <stem>.params.json generation params override (merged into generation_params)
+
+Usage:
+    python pipeline.py \\
+        --drop-dir ./drop \\
+        --output-base ./output \\
+        --blender-path blender \\
+        [--db-path ~/.vrm-pipeline/ledger.db] \\
+        [--golden-dir ./golden] \\
+        [--scene-context ./scenes/terrain.blend] \\
+        [--resolution 768] \\
+        [--embed-model dinov2-small] \\
+        [--no-embed] [--no-tag] \\
+        [--interval 3]
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).parent.resolve()
+
+MESH_EXTS = {".glb", ".gltf", ".obj", ".fbx", ".blend"}
+VRM_EXTS = {".vrm"}
+STATE_FILE = ".pipeline_state.json"
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def _run(cmd, label=""):
+    """Run subprocess, return (stdout, stderr, returncode)."""
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[pipeline] WARN {label} exit={result.returncode}", file=sys.stderr)
+        if result.stderr:
+            print(result.stderr[-2000:], file=sys.stderr)
+    return result.stdout, result.stderr, result.returncode
+
+
+def _extract_json(text):
+    """Find first parseable JSON object in multi-line text."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except Exception:
+                pass
+    # Try whole text
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
+def _read_sidecar_prompt(path: Path) -> str:
+    """Read <stem>.prompt sidecar if present, else return stem as fallback."""
+    sidecar = path.with_suffix(".prompt")
+    if sidecar.exists():
+        return sidecar.read_text(encoding="utf-8").strip()
+    return path.stem.replace("_", " ").replace("-", " ")
+
+
+def _read_sidecar_params(path: Path) -> dict:
+    sidecar = path.with_suffix(".params.json")
+    if sidecar.exists():
+        try:
+            return json.loads(sidecar.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _load_state(drop_dir: Path) -> dict:
+    state_path = drop_dir / STATE_FILE
+    if state_path.exists():
+        try:
+            return json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_state(drop_dir: Path, state: dict):
+    state_path = drop_dir / STATE_FILE
+    state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _mark_done(drop_dir: Path, state: dict, file_hash: str, record_id: str):
+    state[file_hash] = {"record_id": record_id, "ts": time.time()}
+    _save_state(drop_dir, state)
+
+
+def _file_hash(path: Path) -> str:
+    sha = hashlib.sha256()
+    sha.update(str(path.stat().st_mtime).encode())
+    sha.update(path.name.encode())
+    return sha.hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Ledger operations
+# ---------------------------------------------------------------------------
+
+def _ledger_init(db_path: Path):
+    cmd = ["ledger", "--db", str(db_path), "init"]
+    out, err, rc = _run(cmd, "ledger init")
+    if rc != 0:
+        raise RuntimeError(f"ledger init failed: {err}")
+
+
+def _ledger_insert(db_path: Path, prompt: str, r0_dir: str, generation_params: dict) -> str:
+    cmd = [
+        "ledger", "--db", str(db_path), "insert",
+        "--prompt", prompt,
+        "--r0-dir", r0_dir,
+        "--generation-params", json.dumps(generation_params),
+    ]
+    out, err, rc = _run(cmd, "ledger insert")
+    if rc != 0:
+        raise RuntimeError(f"ledger insert failed: {err}")
+    return out.strip()
+
+
+def _ledger_embed(db_path: Path, record_id: str, embed_json: Path):
+    cmd = ["ledger", "--db", str(db_path), "embed",
+           "--id", record_id, "--embed-json", str(embed_json)]
+    _run(cmd, "ledger embed")
+
+
+def _ledger_tag(db_path: Path, record_id: str, tag_json: Path):
+    cmd = ["ledger", "--db", str(db_path), "tag",
+           "--id", record_id, "--tag-json", str(tag_json)]
+    _run(cmd, "ledger tag")
+
+
+# ---------------------------------------------------------------------------
+# Pipeline stages
+# ---------------------------------------------------------------------------
+
+def _render_vrm(vrm_path: Path, output_dir: Path, args) -> dict:
+    cmd = [
+        args.blender_path, "--background", "--python",
+        str(HERE / "render" / "vrm.py"),
+        "--", "--vrm", str(vrm_path), "--output", str(output_dir),
+        "--resolution", str(args.resolution),
+    ]
+    if args.golden_dir:
+        cmd += ["--golden", args.golden_dir]
+    out, err, rc = _run(cmd, "render/vrm.py")
+    if rc != 0:
+        raise RuntimeError(f"render/vrm.py failed (exit {rc})")
+    return _extract_json(out)
+
+
+def _render_object(mesh_path: Path, output_dir: Path, args) -> dict:
+    cmd = [
+        args.blender_path, "--background", "--python",
+        str(HERE / "render" / "object.py"),
+        "--", "--input", str(mesh_path), "--output-dir", str(output_dir),
+        "--resolution", str(args.resolution),
+    ]
+    if args.golden_dir:
+        cmd += ["--golden-dir", args.golden_dir]
+    if args.scene_context:
+        cmd += ["--scene-context", args.scene_context]
+    out, err, rc = _run(cmd, "render/object.py")
+    if rc != 0:
+        raise RuntimeError(f"render/object.py failed (exit {rc})")
+    return _extract_json(out)
+
+
+def _generate(prompt: str, output_dir: Path, args) -> dict:
+    glb_output_dir = output_dir / "generated"
+    glb_output_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable, str(HERE / "generate.py"),
+        "--prompt", prompt,
+        "--output-dir", str(glb_output_dir),
+        "--max-retries", str(args.gen_retries),
+        "--blender-path", args.blender_path,
+        "--model", args.gen_model,
+    ]
+    out, err, rc = _run(cmd, "generate.py")
+    if rc != 0:
+        raise RuntimeError(f"generate.py failed (exit {rc})")
+    gen_params = _extract_json(out)
+    if not gen_params.get("output_glb"):
+        raise RuntimeError("generate.py did not output output_glb in JSON")
+    return gen_params
+
+
+def _run_embed(render_dir: Path, tmp_dir: Path, args) -> Path | None:
+    if args.no_embed:
+        return None
+    embed_json = tmp_dir / "embed.json"
+    cmd = [
+        sys.executable, str(HERE / "embed.py"),
+        "--render-dir", str(render_dir),
+        "--model", args.embed_model,
+        "--output", str(embed_json),
+    ]
+    out, err, rc = _run(cmd, "embed.py")
+    if rc != 0:
+        print(f"[pipeline] embed.py failed (non-fatal)", file=sys.stderr)
+        return None
+    return embed_json if embed_json.exists() else None
+
+
+def _run_tag(render_dir: Path, tmp_dir: Path, args) -> Path | None:
+    if args.no_tag:
+        return None
+    tag_json = tmp_dir / "tags.json"
+    cmd = [
+        sys.executable, str(HERE / "tag.py"),
+        "--render-dir", str(render_dir),
+        "--output", str(tag_json),
+    ]
+    out, err, rc = _run(cmd, "tag.py")
+    if rc != 0:
+        print(f"[pipeline] tag.py failed (non-fatal)", file=sys.stderr)
+        return None
+    return tag_json if tag_json.exists() else None
+
+
+# ---------------------------------------------------------------------------
+# Flow handlers
+# ---------------------------------------------------------------------------
+
+def handle_vrm(path: Path, args) -> str:
+    print(f"[pipeline] VRM flow: {path.name}")
+    stem = path.stem
+    output_dir = Path(args.output_base) / "renders" / stem
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = _render_vrm(path, output_dir, args)
+
+    prompt = _read_sidecar_prompt(path)
+    extra_params = _read_sidecar_params(path)
+    gen_params = {
+        "asset_type": "vrm",
+        "blender_version": summary.get("blender_version"),
+        "vrm_addon_version": summary.get("vrm_addon_version"),
+        "render_sha256": summary.get("render_sha256"),
+        **extra_params,
+    }
+
+    record_id = _ledger_insert(args.db_path, prompt, str(output_dir), gen_params)
+    print(f"[pipeline] ledger record: {record_id}")
+
+    _post_process(record_id, output_dir, args)
+    return record_id
+
+
+def handle_prompt(path: Path, args) -> str:
+    prompt = path.read_text(encoding="utf-8").strip()
+    print(f"[pipeline] Object flow (prompt): {path.name}")
+    stem = path.stem
+    output_dir = Path(args.output_base) / "renders" / stem
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    gen_params = _generate(prompt, output_dir, args)
+    mesh_path = Path(gen_params["output_glb"])
+
+    summary = _render_object(mesh_path, output_dir, args)
+    gen_params.update({
+        "asset_type": "object",
+        "blender_version": summary.get("blender_version"),
+        "render_sha256": summary.get("render_sha256"),
+    })
+
+    record_id = _ledger_insert(args.db_path, prompt, str(output_dir), gen_params)
+    print(f"[pipeline] ledger record: {record_id}")
+
+    _post_process(record_id, output_dir, args)
+    return record_id
+
+
+def handle_mesh(path: Path, args) -> str:
+    print(f"[pipeline] Object render flow: {path.name}")
+    stem = path.stem
+    output_dir = Path(args.output_base) / "renders" / stem
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = _render_object(path, output_dir, args)
+
+    prompt = _read_sidecar_prompt(path)
+    extra_params = _read_sidecar_params(path)
+    gen_params = {
+        "asset_type": "object",
+        "source": str(path),
+        "blender_version": summary.get("blender_version"),
+        "render_sha256": summary.get("render_sha256"),
+        **extra_params,
+    }
+
+    record_id = _ledger_insert(args.db_path, prompt, str(output_dir), gen_params)
+    print(f"[pipeline] ledger record: {record_id}")
+
+    _post_process(record_id, output_dir, args)
+    return record_id
+
+
+def _post_process(record_id: str, render_dir: Path, args):
+    """Run embed + tag and store results in ledger (non-fatal)."""
+    tmp_dir = render_dir / ".pipeline_tmp"
+    tmp_dir.mkdir(exist_ok=True)
+
+    embed_json = _run_embed(render_dir, tmp_dir, args)
+    if embed_json:
+        _ledger_embed(args.db_path, record_id, embed_json)
+        print(f"[pipeline] embedded -> {record_id}")
+
+    tag_json = _run_tag(render_dir, tmp_dir, args)
+    if tag_json:
+        _ledger_tag(args.db_path, record_id, tag_json)
+        print(f"[pipeline] tagged -> {record_id}")
+
+
+# ---------------------------------------------------------------------------
+# Watch loop
+# ---------------------------------------------------------------------------
+
+def watch_loop(args):
+    drop_dir = Path(args.drop_dir)
+    drop_dir.mkdir(parents=True, exist_ok=True)
+
+    # Init ledger
+    try:
+        _ledger_init(args.db_path)
+    except Exception as e:
+        print(f"[pipeline] ledger init warning: {e}", file=sys.stderr)
+
+    print(f"[pipeline] watching {drop_dir} (interval={args.interval}s)")
+    print(f"[pipeline] output_base={args.output_base}")
+    print(f"[pipeline] db={args.db_path}")
+
+    state = _load_state(drop_dir)
+
+    while True:
+        for path in sorted(drop_dir.iterdir()):
+            if path.name.startswith(".") or path.name == STATE_FILE:
+                continue
+
+            ext = path.suffix.lower()
+            fhash = _file_hash(path)
+
+            if fhash in state:
+                continue  # already processed
+
+            try:
+                if ext in VRM_EXTS:
+                    record_id = handle_vrm(path, args)
+                elif ext == ".prompt":
+                    record_id = handle_prompt(path, args)
+                elif ext in MESH_EXTS:
+                    record_id = handle_mesh(path, args)
+                else:
+                    continue
+
+                _mark_done(drop_dir, state, fhash, record_id)
+                print(f"[pipeline] done: {path.name} -> {record_id}")
+
+            except Exception as exc:
+                print(f"[pipeline] ERROR processing {path.name}: {exc}", file=sys.stderr)
+                # Mark as attempted (with error) so we don't retry immediately
+                state[fhash] = {"error": str(exc), "ts": time.time()}
+                _save_state(drop_dir, state)
+
+        time.sleep(args.interval)
+
+
+# ---------------------------------------------------------------------------
+# One-shot mode (process a single file directly)
+# ---------------------------------------------------------------------------
+
+def run_once(path: Path, args):
+    ext = path.suffix.lower()
+    if ext in VRM_EXTS:
+        return handle_vrm(path, args)
+    elif ext == ".prompt":
+        return handle_prompt(path, args)
+    elif ext in MESH_EXTS:
+        return handle_mesh(path, args)
+    else:
+        print(f"[pipeline] unknown file type: {ext}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="VRM/Object pipeline: watch drop dir → generate → render → ledger"
+    )
+    # Mode
+    parser.add_argument("--file", default=None,
+                        help="Process a single file instead of watching a directory")
+    parser.add_argument("--drop-dir", default="./drop",
+                        help="Directory to watch for trigger files (default: ./drop)")
+
+    # Paths
+    home = os.environ.get("HOME", "/tmp")
+    parser.add_argument("--output-base", default="./output",
+                        help="Base directory for render outputs (default: ./output)")
+    parser.add_argument("--db-path",
+                        default=str(Path(home) / ".vrm-pipeline" / "ledger.db"),
+                        help="Path to ledger SQLite DB")
+    parser.add_argument("--blender-path", default="blender",
+                        help="Path to Blender binary (default: blender)")
+
+    # Render options
+    parser.add_argument("--golden-dir", default=None,
+                        help="Golden render directory for eval-A pHash comparison")
+    parser.add_argument("--scene-context", default=None,
+                        help="Terrain .blend for object context render")
+    parser.add_argument("--resolution", type=int, default=768)
+
+    # Generate options
+    parser.add_argument("--gen-model", default="gemini-2.5-flash",
+                        help="Gemini model for generate.py (default: gemini-2.5-flash)")
+    parser.add_argument("--gen-retries", type=int, default=3)
+
+    # Embed/tag
+    parser.add_argument("--embed-model", default="dinov2-small",
+                        choices=["dinov2-small", "clip"])
+    parser.add_argument("--no-embed", action="store_true",
+                        help="Skip embed.py stage")
+    parser.add_argument("--no-tag", action="store_true",
+                        help="Skip tag.py stage")
+
+    # Watch
+    parser.add_argument("--interval", type=int, default=3,
+                        help="Poll interval in seconds (default: 3)")
+
+    args = parser.parse_args()
+    args.db_path = Path(args.db_path)
+    args.output_base = Path(args.output_base)
+
+    if args.file:
+        record_id = run_once(Path(args.file).resolve(), args)
+        print(json.dumps({"record_id": record_id}))
+    else:
+        watch_loop(args)
+
+
+if __name__ == "__main__":
+    main()
