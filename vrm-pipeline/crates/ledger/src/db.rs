@@ -3,7 +3,7 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use uuid::Uuid;
 
-use crate::schema::{CREATE_TABLE_SQL, MIGRATE_V2_SQL, MIGRATE_V3_SQL, Record};
+use crate::schema::{CREATE_TABLE_SQL, MIGRATE_V2_SQL, MIGRATE_V3_SQL, MIGRATE_V4_SQL, Record};
 
 pub fn open(db_path: &std::path::Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
@@ -22,6 +22,7 @@ pub fn init(db_path: &std::path::Path) -> Result<()> {
     // Idempotent migrations: ignore error if column already exists.
     let _ = conn.execute_batch(MIGRATE_V2_SQL);
     let _ = conn.execute_batch(MIGRATE_V3_SQL);
+    let _ = conn.execute_batch(MIGRATE_V4_SQL);
     Ok(())
 }
 
@@ -32,14 +33,15 @@ pub fn insert(
     generation_params: &str,
     asset_ref: &str,
     parent_id: Option<&str>,
+    image_ref: Option<&str>,
 ) -> Result<String> {
     let conn = open(db_path)?;
     let id = Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO records (id, timestamp, prompt, generation_params, r0_ref, asset_ref, parent_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![id, timestamp, prompt, generation_params, r0_ref, asset_ref, parent_id],
+        "INSERT INTO records (id, timestamp, prompt, generation_params, r0_ref, asset_ref, parent_id, image_ref) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![id, timestamp, prompt, generation_params, r0_ref, asset_ref, parent_id, image_ref],
     )
     .context("failed to insert record")?;
     Ok(id)
@@ -50,7 +52,7 @@ pub fn get_record(db_path: &std::path::Path, id: &str) -> Result<Record> {
     let conn = open(db_path)?;
     let record = conn
         .query_row(
-            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id \
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id, image_ref \
              FROM records WHERE id = ?1",
             params![id],
             row_to_record,
@@ -64,7 +66,7 @@ pub fn all_records(db_path: &std::path::Path) -> Result<Vec<Record>> {
     let conn = open(db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id \
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id, image_ref \
              FROM records ORDER BY timestamp ASC",
         )
         .context("failed to prepare statement")?;
@@ -90,6 +92,7 @@ fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<Record> {
         asset_ref: row.get(7)?,
         derived: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "{}".to_string()),
         parent_id: row.get(9)?,
+        image_ref: row.get(10)?,
     })
 }
 
@@ -121,7 +124,7 @@ pub fn list_records(db_path: &std::path::Path, limit: u32) -> Result<Vec<Record>
     let conn = open(db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id \
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id, image_ref \
              FROM records ORDER BY timestamp DESC LIMIT ?1",
         )
         .context("failed to prepare statement")?;
@@ -362,7 +365,7 @@ mod tests {
     fn test_insert_creates_record() {
         let (_dir, db_path) = temp_db();
         init(&db_path).unwrap();
-        let id = insert(&db_path, "hello", "/tmp/r0", "{}", "{}", None).unwrap();
+        let id = insert(&db_path, "hello", "/tmp/r0", "{}", "{}", None, None).unwrap();
         assert!(!id.is_empty());
 
         let records = list_records(&db_path, 10).unwrap();
@@ -376,8 +379,8 @@ mod tests {
     fn test_insert_with_parent_and_get_record() {
         let (_dir, db_path) = temp_db();
         init(&db_path).unwrap();
-        let root = insert(&db_path, "chair", "", "{}", "{}", None).unwrap();
-        let child = insert(&db_path, "chair v2", "", "{}", "{}", Some(&root)).unwrap();
+        let root = insert(&db_path, "chair", "", "{}", "{}", None, None).unwrap();
+        let child = insert(&db_path, "chair v2", "", "{}", "{}", Some(&root), None).unwrap();
 
         let r = get_record(&db_path, &child).unwrap();
         assert_eq!(r.parent_id.as_deref(), Some(root.as_str()));
@@ -387,10 +390,34 @@ mod tests {
     }
 
     #[test]
+    fn test_insert_with_image_ref_roundtrips() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let id = insert(
+            &db_path,
+            "with-image",
+            "",
+            "{}",
+            "{}",
+            None,
+            Some("/tmp/input.png"),
+        )
+        .unwrap();
+
+        let r = get_record(&db_path, &id).unwrap();
+        assert_eq!(r.image_ref.as_deref(), Some("/tmp/input.png"));
+
+        // a record without an image keeps image_ref None
+        let id2 = insert(&db_path, "no-image", "", "{}", "{}", None, None).unwrap();
+        let r2 = get_record(&db_path, &id2).unwrap();
+        assert_eq!(r2.image_ref, None);
+    }
+
+    #[test]
     fn test_adopt_sets_adopted_true() {
         let (_dir, db_path) = temp_db();
         init(&db_path).unwrap();
-        let id = insert(&db_path, "adopt-test", "", "{}", "{}", None).unwrap();
+        let id = insert(&db_path, "adopt-test", "", "{}", "{}", None, None).unwrap();
         adopt(&db_path, &id).unwrap();
 
         let records = list_records(&db_path, 10).unwrap();
@@ -412,7 +439,7 @@ mod tests {
     fn test_set_derived_key_stores_and_updates() {
         let (_dir, db_path) = temp_db();
         init(&db_path).unwrap();
-        let id = insert(&db_path, "embed-test", "", "{}", "{}", None).unwrap();
+        let id = insert(&db_path, "embed-test", "", "{}", "{}", None, None).unwrap();
 
         let v1 = serde_json::json!({"record_embedding": [1.0, 2.0]});
         set_derived_key(&db_path, &id, "embed", &v1).unwrap();
@@ -444,8 +471,8 @@ mod tests {
     fn test_all_embeddings_returns_rows_with_embed() {
         let (_dir, db_path) = temp_db();
         init(&db_path).unwrap();
-        let id1 = insert(&db_path, "a", "", "{}", "{}", None).unwrap();
-        let id2 = insert(&db_path, "b", "", "{}", "{}", None).unwrap();
+        let id1 = insert(&db_path, "a", "", "{}", "{}", None, None).unwrap();
+        let id2 = insert(&db_path, "b", "", "{}", "{}", None, None).unwrap();
 
         let v = serde_json::json!({"record_embedding": [0.1, 0.2, 0.3]});
         set_derived_key(&db_path, &id1, "embed", &v).unwrap();

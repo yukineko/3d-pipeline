@@ -48,6 +48,10 @@ enum Commands {
         /// id of the record this one is derived from (lineage parent)
         #[arg(long = "parent-id")]
         parent_id: Option<String>,
+
+        /// path to the input image used to generate this record
+        #[arg(long = "image-ref")]
+        image_ref: Option<String>,
     },
 
     /// Print a single record as JSON
@@ -157,6 +161,7 @@ fn main() -> Result<()> {
             generation_params,
             asset_ref,
             parent_id,
+            image_ref,
         } => {
             let r0_ref = r0_dir.unwrap_or_default();
             let id = db::insert(
@@ -166,6 +171,7 @@ fn main() -> Result<()> {
                 &generation_params,
                 &asset_ref,
                 parent_id.as_deref(),
+                image_ref.as_deref(),
             )?;
             println!("{id}");
         }

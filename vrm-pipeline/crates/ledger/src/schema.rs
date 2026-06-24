@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS records (
     outcome           TEXT NOT NULL DEFAULT '{}',
     asset_ref         TEXT NOT NULL DEFAULT '{}',
     derived           TEXT NOT NULL DEFAULT '{}',
-    parent_id         TEXT
+    parent_id         TEXT,
+    image_ref         TEXT
 );
 "#;
 
@@ -21,6 +22,9 @@ pub const MIGRATE_V2_SQL: &str =
 
 // Idempotent migration: add parent_id column (lineage) to DBs created before schema v3.
 pub const MIGRATE_V3_SQL: &str = "ALTER TABLE records ADD COLUMN parent_id TEXT;";
+
+// Idempotent migration: add image_ref column (input image path) to DBs created before schema v4.
+pub const MIGRATE_V4_SQL: &str = "ALTER TABLE records ADD COLUMN image_ref TEXT;";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Record {
@@ -35,4 +39,6 @@ pub struct Record {
     pub derived: String,
     /// id of the record this one was derived from (None for roots).
     pub parent_id: Option<String>,
+    /// path to the input image used to generate this record (None if none).
+    pub image_ref: Option<String>,
 }
