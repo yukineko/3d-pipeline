@@ -451,9 +451,38 @@ def handle_prompt(path: Path, args) -> str:
     sidecar_params = _read_sidecar_params(path)
     parent_id = _pop_parent_id(sidecar_params)
     image_ref = _pop_image_ref(sidecar_params)
+    vroid_edit = sidecar_params.pop("vroid_edit", False)
+    base_vrm = sidecar_params.pop("base_vrm", None)
+    change = sidecar_params.pop("change", None)
     prompt = _enrich_prompt(prompt, args)
 
-    if image_ref:
+    if vroid_edit:
+        # VRoid edit flow: infer VRM param adjustments from prompt/image,
+        # apply them to the parent's base VRM via Blender (VRM addon), re-export.
+        if not base_vrm:
+            raise RuntimeError("vroid_edit requires base_vrm in sidecar params")
+        from vroid_params import infer_vrm_adjustments  # lazy: pulls in Gemini SDK
+        from render.vrm_edit import edit_vrm  # lazy: avoids bpy import at module load
+        adjustments = infer_vrm_adjustments(
+            change or prompt, image_path=image_ref, model=args.gen_model
+        )
+        vrm_path = output_dir / "generated" / f"{stem}.vrm"
+        vrm_path.parent.mkdir(parents=True, exist_ok=True)
+        edit_vrm(base_vrm, vrm_path, adjustments, blender_path=args.blender_path)
+        print(f"[pipeline] edited VRM -> {vrm_path}")
+
+        summary = _render_vrm(vrm_path, output_dir, args)
+        gen_params = {
+            "asset_type": "vrm",
+            "vroid_edit": True,
+            "base_vrm": str(base_vrm),
+            "change": change,
+            "adjustments": adjustments,
+            "vrm_path": str(vrm_path),
+            "blender_version": summary.get("blender_version"),
+            "render_sha256": summary.get("render_sha256"),
+        }
+    elif image_ref:
         # Image-derived VRM flow: Hyper3D image-to-3D → GLB → VRM conversion.
         gen_params = _generate(prompt, output_dir, args, image_ref=image_ref)
         glb_path = Path(gen_params["output_glb"])

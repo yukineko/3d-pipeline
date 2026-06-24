@@ -200,5 +200,73 @@ class TestHandlePromptImageFlow(unittest.TestCase):
             self.assertEqual(insert_calls["asset_type"], "vrm")
 
 
+class TestHandlePromptVroidFlow(unittest.TestCase):
+    def test_vroid_edit_drives_edit_and_lineage(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            prompt_path = d / "char_v3.prompt"
+            prompt_path.write_text("ベースの少女\n", encoding="utf-8")
+            (d / "char_v3.params.json").write_text(
+                json.dumps({
+                    "parent_id": "parent-vroid",
+                    "vroid_edit": True,
+                    "base_vrm": "/abs/base.vrm",
+                    "change": "髪を金色に、笑顔に",
+                }),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                output_base=str(d / "out"),
+                blender_path="blender",
+                db_path=Path("/tmp/db"),
+                gen_retries=1,
+                gen_model="gemini-2.5-flash",
+            )
+
+            infer_calls = {}
+
+            def fake_infer(text, image_path=None, model=None):
+                infer_calls["text"] = text
+                infer_calls["image_path"] = image_path
+                return {"expressions": {"happy": 1.0}, "materials": {"hair": [1, 0.8, 0, 1]}, "height_scale": 1.0}
+
+            edit_calls = {}
+
+            def fake_edit(in_vrm, out_vrm, adjustments, blender_path=None):
+                edit_calls["in_vrm"] = in_vrm
+                edit_calls["adjustments"] = adjustments
+                return str(out_vrm)
+
+            insert_calls = {}
+
+            def fake_insert(db_path, prompt, r0, params, parent_id=None, image_ref=None):
+                insert_calls["parent_id"] = parent_id
+                insert_calls["asset_type"] = params.get("asset_type")
+                insert_calls["adjustments"] = params.get("adjustments")
+                insert_calls["base_vrm"] = params.get("base_vrm")
+                return "rec-vroid"
+
+            with mock.patch("vroid_params.infer_vrm_adjustments", side_effect=fake_infer), \
+                 mock.patch("render.vrm_edit.edit_vrm", side_effect=fake_edit) as edit_mock, \
+                 mock.patch.object(pipeline, "_render_vrm", return_value={"blender_version": "4.x", "render_sha256": "z"}), \
+                 mock.patch.object(pipeline, "_enrich_prompt", side_effect=lambda p, a: p), \
+                 mock.patch.object(pipeline, "_ledger_insert", side_effect=fake_insert), \
+                 mock.patch.object(pipeline, "_post_process"):
+                rid = pipeline.handle_prompt(prompt_path, args)
+
+            self.assertEqual(rid, "rec-vroid")
+            # adjustment inferred from the change instruction
+            self.assertEqual(infer_calls["text"], "髪を金色に、笑顔に")
+            # edit_vrm applied to the parent's base VRM with the inferred adjustments
+            self.assertTrue(edit_mock.called)
+            self.assertEqual(edit_calls["in_vrm"], "/abs/base.vrm")
+            self.assertEqual(edit_calls["adjustments"]["expressions"]["happy"], 1.0)
+            # lineage + metadata reach the ledger
+            self.assertEqual(insert_calls["parent_id"], "parent-vroid")
+            self.assertEqual(insert_calls["asset_type"], "vrm")
+            self.assertEqual(insert_calls["base_vrm"], "/abs/base.vrm")
+            self.assertIsNotNone(insert_calls["adjustments"])
+
+
 if __name__ == "__main__":
     unittest.main()
