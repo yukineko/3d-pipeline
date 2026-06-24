@@ -163,6 +163,46 @@ def _ledger_update_outcome_phash(db_path: Path, record_id: str, edit_dist: float
     _run(cmd, "ledger update-outcome")
 
 
+def _ledger_update_outcome_embed(db_path: Path, record_id: str, edit_dist: float):
+    cmd = [
+        "ledger", "--db", str(db_path), "update-outcome",
+        "--id", record_id,
+        "--edit-dist-embed", str(edit_dist),
+    ]
+    _run(cmd, "ledger update-outcome embed")
+
+
+def _ledger_set_r1_ref(db_path: Path, record_id: str, r1_dir: str):
+    cmd = [
+        "ledger", "--db", str(db_path), "set-r1-ref",
+        "--id", record_id,
+        "--path", r1_dir,
+    ]
+    _run(cmd, "ledger set-r1-ref")
+
+
+def _ledger_get_embedding(db_path: Path, record_id: str) -> list | None:
+    cmd = ["ledger", "--db", str(db_path), "get-embedding", "--id", record_id]
+    out, err, rc = _run(cmd, "ledger get-embedding")
+    if rc != 0:
+        return None
+    try:
+        return json.loads(out).get("record_embedding")
+    except Exception:
+        return None
+
+
+def _cosine_distance(a: list, b: list) -> float | None:
+    if len(a) != len(b) or not a:
+        return None
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    if na == 0 or nb == 0:
+        return None
+    return 1.0 - dot / (na * nb)
+
+
 def _ledger_init(db_path: Path):
     cmd = ["ledger", "--db", str(db_path), "init"]
     out, err, rc = _run(cmd, "ledger init")
@@ -328,13 +368,28 @@ def handle_vrm_r1(path: Path, args, state: dict, drop_dir: Path) -> str:
     r1_dir.mkdir(parents=True, exist_ok=True)
 
     _render_vrm(path, r1_dir, args)
+    _ledger_set_r1_ref(args.db_path, r0_record_id, str(r1_dir))
 
-    dist = _compute_phash_distance(r0_dir, r1_dir)
-    if dist is not None:
-        _ledger_update_outcome_phash(args.db_path, r0_record_id, dist)
-        print(f"[pipeline] R1 edit_dist_phash={dist:.4f} -> record {r0_record_id}")
+    phash_dist = _compute_phash_distance(r0_dir, r1_dir)
+    if phash_dist is not None:
+        _ledger_update_outcome_phash(args.db_path, r0_record_id, phash_dist)
+        print(f"[pipeline] R1 edit_dist_phash={phash_dist:.4f} -> record {r0_record_id}")
     else:
         print(f"[pipeline] WARN could not compute pHash distance (imagehash not available?)", file=sys.stderr)
+
+    if not args.no_embed:
+        tmp_dir = r1_dir / ".pipeline_tmp"
+        tmp_dir.mkdir(exist_ok=True)
+        r1_embed_json = _run_embed(r1_dir, tmp_dir, args)
+        if r1_embed_json:
+            r1_data = json.loads(r1_embed_json.read_text(encoding="utf-8"))
+            r1_vec = r1_data.get("record_embedding")
+            r0_vec = _ledger_get_embedding(args.db_path, r0_record_id)
+            if r1_vec and r0_vec:
+                embed_dist = _cosine_distance(r0_vec, r1_vec)
+                if embed_dist is not None:
+                    _ledger_update_outcome_embed(args.db_path, r0_record_id, embed_dist)
+                    print(f"[pipeline] R1 edit_dist_embed={embed_dist:.6f} -> record {r0_record_id}")
 
     return r0_record_id
 

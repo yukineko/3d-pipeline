@@ -160,6 +160,63 @@ pub fn all_embeddings(db_path: &std::path::Path) -> Result<Vec<EmbeddingRow>> {
     Ok(out)
 }
 
+pub fn set_r1_ref(db_path: &std::path::Path, id: &str, r1_ref: &str) -> Result<()> {
+    let conn = open(db_path)?;
+    let affected = conn.execute(
+        "UPDATE records SET r1_ref = ?1 WHERE id = ?2",
+        params![r1_ref, id],
+    )
+    .context("failed to set r1_ref")?;
+    if affected == 0 {
+        anyhow::bail!("record not found: {id}");
+    }
+    Ok(())
+}
+
+pub fn get_embedding(db_path: &std::path::Path, id: &str) -> Result<Option<Vec<f64>>> {
+    let conn = open(db_path)?;
+    let derived: String = conn
+        .query_row(
+            "SELECT derived FROM records WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .with_context(|| format!("record not found: {id}"))?
+        .unwrap_or_else(|| "{}".to_string());
+
+    let obj: serde_json::Value = serde_json::from_str(&derived).unwrap_or(serde_json::json!({}));
+    if let Some(arr) = obj["embed"]["record_embedding"].as_array() {
+        let vec: Vec<f64> = arr.iter().filter_map(|v| v.as_f64()).collect();
+        if !vec.is_empty() {
+            return Ok(Some(vec));
+        }
+    }
+    Ok(None)
+}
+
+pub fn update_outcome_embed(db_path: &std::path::Path, id: &str, edit_dist_embed: f64) -> Result<()> {
+    let conn = open(db_path)?;
+    let outcome: String = conn
+        .query_row(
+            "SELECT outcome FROM records WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("record not found: {id}"))?;
+
+    let mut obj: serde_json::Value =
+        serde_json::from_str(&outcome).unwrap_or(serde_json::json!({}));
+    obj["edit_dist_embed"] = serde_json::json!(edit_dist_embed);
+    let updated = serde_json::to_string(&obj).context("failed to serialize outcome")?;
+
+    conn.execute(
+        "UPDATE records SET outcome = ?1 WHERE id = ?2",
+        params![updated, id],
+    )
+    .context("failed to update outcome")?;
+    Ok(())
+}
+
 pub fn update_outcome_phash(db_path: &std::path::Path, id: &str, edit_dist_phash: f64) -> Result<()> {
     let conn = open(db_path)?;
     let outcome: String = conn

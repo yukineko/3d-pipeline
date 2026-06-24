@@ -92,14 +92,34 @@ enum Commands {
         top_k: usize,
     },
 
-    /// Update outcome.edit_dist_phash for a record (R0→R1 pHash distance)
+    /// Update outcome edit distances for a record (R0→R1)
     UpdateOutcome {
         /// Record ID
         #[arg(long)]
         id: String,
         /// R0→R1 pHash edit distance (average hamming distance across faces)
         #[arg(long = "edit-dist-phash")]
-        edit_dist_phash: f64,
+        edit_dist_phash: Option<f64>,
+        /// R0→R1 embedding cosine distance
+        #[arg(long = "edit-dist-embed")]
+        edit_dist_embed: Option<f64>,
+    },
+
+    /// Set the r1_ref path for a record
+    SetR1Ref {
+        /// Record ID
+        #[arg(long)]
+        id: String,
+        /// Path to R1 render directory
+        #[arg(long)]
+        path: String,
+    },
+
+    /// Get the stored embedding vector for a record (JSON)
+    GetEmbedding {
+        /// Record ID
+        #[arg(long)]
+        id: String,
     },
 }
 
@@ -183,9 +203,33 @@ fn main() -> Result<()> {
             println!("Saved tags for {id}");
         }
 
-        Commands::UpdateOutcome { id, edit_dist_phash } => {
-            db::update_outcome_phash(&db_path, &id, edit_dist_phash)?;
-            println!("Updated outcome for {id}: edit_dist_phash={edit_dist_phash}");
+        Commands::UpdateOutcome { id, edit_dist_phash, edit_dist_embed } => {
+            if let Some(phash) = edit_dist_phash {
+                db::update_outcome_phash(&db_path, &id, phash)?;
+                println!("Updated outcome for {id}: edit_dist_phash={phash}");
+            }
+            if let Some(embed) = edit_dist_embed {
+                db::update_outcome_embed(&db_path, &id, embed)?;
+                println!("Updated outcome for {id}: edit_dist_embed={embed}");
+            }
+        }
+
+        Commands::SetR1Ref { id, path } => {
+            db::set_r1_ref(&db_path, &id, &path)?;
+            println!("Set r1_ref for {id}: {path}");
+        }
+
+        Commands::GetEmbedding { id } => {
+            match db::get_embedding(&db_path, &id)? {
+                Some(vec) => {
+                    let json = serde_json::json!({"id": id, "record_embedding": vec});
+                    println!("{}", serde_json::to_string(&json).unwrap());
+                }
+                None => {
+                    eprintln!("No embedding found for {id}");
+                    std::process::exit(1);
+                }
+            }
         }
 
         Commands::Similar { embed_json, top_k } => {
