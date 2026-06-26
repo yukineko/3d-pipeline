@@ -5,7 +5,7 @@
     {
       "name": "vrm-pipeline",
       "source": "./",
-      "description": "Slash commands wrapping the VRM pipeline CLIs (dist, ledger, vrm-watch)"
+      "description": "Slash commands wrapping the VRM pipeline CLIs (derive, dist, ledger, vrm-watch)"
     }
   ]
 }
