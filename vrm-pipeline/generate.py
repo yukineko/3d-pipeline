@@ -26,6 +26,7 @@ Environment variables for Hyper3D backend:
 """
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -36,6 +37,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import script_guard
 
 SYSTEM_INSTRUCTION = """\
 You are a Blender 4.2 Python script generator.
@@ -570,6 +573,37 @@ def save_script(script_text: str, sha: str) -> str:
     return script_path
 
 
+_KILLSWITCH_ENV = "PIPELINE_BLOCK_UNTRUSTED_CODE"
+_TRUTHY = frozenset({"1", "true", "yes"})
+
+
+def _killswitch_enabled() -> bool:
+    """Return True when the policy kill switch env var is set to a truthy value."""
+    val = os.environ.get(_KILLSWITCH_ENV, "")
+    return val.strip().lower() in _TRUTHY
+
+
+def audit_log(output_dir: str, record: dict) -> None:
+    """Append a single JSON line describing a code-execution decision.
+
+    Writes to ``<output_dir>/.code_audit.jsonl`` in append-only mode (the file
+    is created if missing and never truncated).  A ``timestamp`` (ISO-8601 UTC)
+    is added when not already present.  Audit logging must never crash the
+    pipeline, so I/O errors are swallowed (best-effort to stderr).
+    """
+    rec = dict(record)
+    rec.setdefault(
+        "timestamp",
+        datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    audit_path = os.path.join(output_dir, ".code_audit.jsonl")
+    try:
+        with open(audit_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as exc:  # pragma: no cover - best effort
+        print(f"Warning: failed to write audit log {audit_path}: {exc}", file=sys.stderr)
+
+
 def run_blender(blender_path: str, script_path: str, output_glb: str):
     """Run blender headless and return (exit_code, stdout, stderr)."""
     cmd = [
@@ -682,6 +716,76 @@ def main():
         sha = script_hash(script_text)
         script_path = save_script(script_text, sha)
         output_glb = os.path.join(output_dir, f"gen_{sha}.glb")
+
+        # --- Untrusted code gate: static guard + consent + kill switch + audit ---
+        # The script returned by Gemini is UNTRUSTED arbitrary code that we are
+        # about to hand to Blender for execution at host privilege.  Inspect it
+        # statically first; never run a script that fails the guard.
+        violations = script_guard.guard_script(script_text, output_dir=output_dir)
+        violation_strs = [str(v) for v in violations]
+
+        if violations:
+            print(
+                f"SECURITY: refusing to execute generated script {sha}: "
+                f"{len(violations)} guard violation(s) detected.",
+                file=sys.stderr,
+            )
+            for v in violations:
+                print(
+                    f"  [{v.kind}] line {v.lineno}: {v.detail}",
+                    file=sys.stderr,
+                )
+            print(f"  script_hash={sha} script_path={script_path}", file=sys.stderr)
+            audit_log(output_dir, {
+                "script_hash": sha,
+                "script_path": script_path,
+                "output_glb": output_glb,
+                "guard_ok": False,
+                "violations": violation_strs,
+                "decision": "blocked",
+                "reason": "guard_violation",
+            })
+            # Retrying an injected/malicious script is pointless: fail hard.
+            sys.exit(1)
+
+        # Kill switch: refuse execution by policy even when the guard passes.
+        if _killswitch_enabled():
+            print(
+                f"SECURITY: execution of generated script {sha} blocked by policy "
+                f"({_KILLSWITCH_ENV} is set). Not running Blender.",
+                file=sys.stderr,
+            )
+            audit_log(output_dir, {
+                "script_hash": sha,
+                "script_path": script_path,
+                "output_glb": output_glb,
+                "guard_ok": True,
+                "violations": [],
+                "decision": "blocked",
+                "reason": "policy_killswitch",
+            })
+            sys.exit(1)
+
+        # Consent banner: make the untrusted-code execution visible on stderr.
+        print(
+            "============================================================\n"
+            "WARNING: about to execute LLM-GENERATED, UNVERIFIED Python code\n"
+            "         with Blender at host privilege. This code was produced\n"
+            "         by a language model and has only passed a static guard.\n"
+            f"         script_hash={sha}\n"
+            f"         script_path={script_path}\n"
+            "============================================================",
+            file=sys.stderr,
+        )
+
+        audit_log(output_dir, {
+            "script_hash": sha,
+            "script_path": script_path,
+            "output_glb": output_glb,
+            "guard_ok": True,
+            "violations": [],
+            "decision": "run",
+        })
 
         exit_code, stdout, stderr = run_blender(args.blender_path, script_path, output_glb)
 
