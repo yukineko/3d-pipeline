@@ -30,6 +30,7 @@ import datetime
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -107,6 +108,17 @@ def parse_args():
         "--model",
         default="gemini-2.5-flash",
         help="Gemini model name (default: gemini-2.5-flash).",
+    )
+    parser.add_argument(
+        "--sandbox",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in, best-effort OS sandbox (macOS Seatbelt) around the "
+            "untrusted Blender process: no network, writes confined to the "
+            "output dir. Can also be enabled via PIPELINE_SANDBOX=1. "
+            "Ignored (with a warning) on platforms without sandbox-exec."
+        ),
     )
     # --- Hyper3D / Rodin image-to-3D options ---
     parser.add_argument(
@@ -604,8 +616,68 @@ def audit_log(output_dir: str, record: dict) -> None:
         print(f"Warning: failed to write audit log {audit_path}: {exc}", file=sys.stderr)
 
 
-def run_blender(blender_path: str, script_path: str, output_glb: str):
-    """Run blender headless and return (exit_code, stdout, stderr)."""
+# ---------------------------------------------------------------------------
+# Best-effort, opt-in OS sandbox around untrusted Blender execution.
+#
+# HONESTY NOTE: This is DEFENSE-IN-DEPTH at the process level only (macOS
+# Seatbelt / sandbox-exec). It is NOT a substitute for the static guard
+# (script_guard) nor for the consent/audit gate in main(); it is an extra
+# containment layer so that even a guard-passing — yet still LLM-generated and
+# therefore untrusted — bpy script is constrained (no network egress, writes
+# confined to the output directory). True isolation for untrusted code ideally
+# runs inside a disposable Linux container / CI sandbox. The seatbelt profile
+# below is intentionally conservative and may need tuning for some Blender
+# features (e.g. GPU/Metal, plugins). The sandbox is OPT-IN (default OFF) and
+# best-effort: if it cannot be applied on this platform, generation proceeds
+# WITHOUT the OS sandbox after a one-time warning.
+# ---------------------------------------------------------------------------
+
+_SANDBOX_TRUTHY = frozenset({"1", "true", "yes"})
+
+
+def sandbox_available() -> bool:
+    """Return True when the best-effort OS sandbox can be applied here.
+
+    Currently only macOS Seatbelt via ``sandbox-exec`` is supported.
+    """
+    return sys.platform == "darwin" and shutil.which("sandbox-exec") is not None
+
+
+def _seatbelt_profile(output_dir: str) -> str:
+    """Build a conservative macOS Seatbelt profile string.
+
+    Default-deny everything; allow only what Blender needs to start and run,
+    deny network egress, and confine writes to ``output_dir`` (plus the system
+    temp dirs and /dev/null that Blender needs to boot).
+    """
+    return (
+        "(version 1)\n"
+        "(deny default)\n"
+        "(deny network*)\n"
+        "(allow process-exec)\n"
+        "(allow process-fork)\n"
+        "(allow sysctl-read)\n"
+        "(allow mach-lookup)\n"
+        "(allow signal (target self))\n"
+        "(allow file-read*)\n"
+        '(allow file-write-data (path "/dev/null"))\n'
+        "(allow file-write*\n"
+        f'    (subpath "{output_dir}")\n'
+        '    (subpath "/private/var/folders")\n'
+        '    (subpath "/private/tmp")\n'
+        '    (subpath "/tmp"))\n'
+    )
+
+
+def build_blender_cmd(blender_path, script_path, output_glb, sandbox=False):
+    """Return the argv list to launch Blender, optionally wrapped in a sandbox.
+
+    This function is PURE (no printing, no process launch). With
+    ``sandbox=False`` it returns the original command exactly. With
+    ``sandbox=True`` it wraps the command in a macOS Seatbelt profile when
+    available (see ``sandbox_available``); otherwise it returns the plain
+    command and the caller is responsible for warning the user.
+    """
     cmd = [
         blender_path,
         "--background",
@@ -613,6 +685,20 @@ def run_blender(blender_path: str, script_path: str, output_glb: str):
         "--",
         "--output", output_glb,
     ]
+    if sandbox and sandbox_available():
+        output_dir = os.path.dirname(os.path.abspath(output_glb))
+        profile = _seatbelt_profile(output_dir)
+        return ["sandbox-exec", "-p", profile, *cmd]
+    return cmd
+
+
+def run_blender(blender_path: str, script_path: str, output_glb: str, sandbox: bool = False):
+    """Run blender headless and return (exit_code, stdout, stderr).
+
+    When ``sandbox`` is True a best-effort OS sandbox is applied if available;
+    otherwise the plain command is run (best-effort, never fails for that).
+    """
+    cmd = build_blender_cmd(blender_path, script_path, output_glb, sandbox=sandbox)
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -702,6 +788,23 @@ def main():
     api_key = check_api_key()
     genai.configure(api_key=api_key)
 
+    # Resolve opt-in OS sandbox from CLI flag OR PIPELINE_SANDBOX env (flag OR env).
+    env_sandbox = os.environ.get("PIPELINE_SANDBOX", "").strip().lower() in _SANDBOX_TRUTHY
+    sandbox_requested = bool(args.sandbox) or env_sandbox
+    if sandbox_requested:
+        if sandbox_available():
+            print(
+                "[generate] OS sandbox active (macOS Seatbelt): no network; "
+                "writes confined to the output directory.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "[generate] WARNING: sandbox requested but unavailable on this "
+                "platform; running WITHOUT OS sandbox",
+                file=sys.stderr,
+            )
+
     last_stderr = ""
     script_text = None
     sha = None
@@ -787,7 +890,16 @@ def main():
             "decision": "run",
         })
 
-        exit_code, stdout, stderr = run_blender(args.blender_path, script_path, output_glb)
+        if sandbox_requested:
+            exit_code, stdout, stderr = run_blender(
+                args.blender_path, script_path, output_glb, sandbox=True
+            )
+        else:
+            # Backward-compatible 3-arg call (default OFF preserves existing
+            # pipeline behavior and call signature).
+            exit_code, stdout, stderr = run_blender(
+                args.blender_path, script_path, output_glb
+            )
 
         glb_exists = os.path.isfile(output_glb)
 
