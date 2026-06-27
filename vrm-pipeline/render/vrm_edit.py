@@ -591,6 +591,12 @@ def edit_vrm(
             f"--- stdout (tail) ---\n{stdout_tail}"
         )
 
+    # Output guarantee: a clean Blender exit does not prove a valid VRM was
+    # written.  Reject a missing/empty/corrupt file before reporting success.
+    from render.vrm_utils import assert_valid_glb
+
+    assert_valid_glb(out_vrm)
+
     return str(out_vrm)
 
 

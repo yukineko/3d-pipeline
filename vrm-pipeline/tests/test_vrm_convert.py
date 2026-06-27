@@ -32,6 +32,20 @@ HERE = Path(__file__).resolve().parent
 PIPELINE_ROOT = HERE.parent
 if str(PIPELINE_ROOT) not in sys.path:
     sys.path.insert(0, str(PIPELINE_ROOT))
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+# A successful (mocked) Blender run must also leave a valid GLB on disk, since
+# glb_to_vrm now asserts the output is a real glTF binary before returning.
+from glb_fixtures import write_glb_for_out_flag
+
+
+def _fake_run_writes_glb(fake_result):
+    """subprocess.run side_effect: simulate Blender writing --out, then succeed."""
+    def _run(cmd, **kwargs):
+        write_glb_for_out_flag(cmd)
+        return fake_result
+    return _run
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +250,7 @@ class TestSubprocessResultPropagation(unittest.TestCase):
             glb.write_bytes(b"")
             vrm = Path(d) / "out.vrm"
 
-            with patch("subprocess.run", return_value=fake_result):
+            with patch("subprocess.run", side_effect=_fake_run_writes_glb(fake_result)):
                 result = glb_to_vrm(str(glb), str(vrm), blender_path="blender")
 
             self.assertEqual(result, str(vrm.resolve()))
@@ -265,7 +279,7 @@ class TestBlenderPathEnvFallback(unittest.TestCase):
             glb.write_bytes(b"")
             vrm = Path(d) / "out.vrm"
 
-            with patch("subprocess.run", return_value=fake_result) as mock_run, \
+            with patch("subprocess.run", side_effect=_fake_run_writes_glb(fake_result)) as mock_run, \
                  patch.dict(os.environ, {"BLENDER_PATH": "/custom/blender"}):
                 glb_to_vrm(str(glb), str(vrm), blender_path=None)
 
@@ -287,7 +301,7 @@ class TestBlenderPathEnvFallback(unittest.TestCase):
             glb.write_bytes(b"")
             vrm = Path(d) / "out.vrm"
 
-            with patch("subprocess.run", return_value=fake_result) as mock_run, \
+            with patch("subprocess.run", side_effect=_fake_run_writes_glb(fake_result)) as mock_run, \
                  patch.dict(os.environ, env_without_blender, clear=True):
                 glb_to_vrm(str(glb), str(vrm), blender_path=None)
 

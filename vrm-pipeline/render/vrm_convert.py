@@ -248,6 +248,12 @@ def glb_to_vrm(
             f"--- stdout (tail) ---\n{stdout_tail}"
         )
 
+    # Output guarantee: a clean Blender exit does not prove a valid VRM was
+    # written.  Reject a missing/empty/corrupt file before reporting success.
+    from render.vrm_utils import assert_valid_glb
+
+    assert_valid_glb(vrm_path)
+
     return str(vrm_path)
 
 
