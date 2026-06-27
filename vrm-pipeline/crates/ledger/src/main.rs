@@ -202,11 +202,7 @@ fn main() -> Result<()> {
                 );
                 println!("{}", "-".repeat(120));
                 for r in &records {
-                    let prompt_short = if r.prompt.len() > 38 {
-                        format!("{}...", &r.prompt[..35])
-                    } else {
-                        r.prompt.clone()
-                    };
+                    let prompt_short = short_prompt(&r.prompt);
                     println!(
                         "{:<38} {:<25} {:<40} {}",
                         r.id, r.timestamp, prompt_short, r.r0_ref
@@ -300,6 +296,17 @@ fn main() -> Result<()> {
 
 /// Render records as an ASCII derivation tree. Roots are records whose parent_id
 /// is absent (or points outside the set). With `root`, only that subtree prints.
+/// Shorten a prompt for the fixed-width List view. Counts Unicode scalar
+/// values rather than bytes: byte slicing (`&prompt[..35]`) panics when the cut
+/// falls mid-codepoint, which multibyte prompts (e.g. Japanese) hit immediately.
+fn short_prompt(prompt: &str) -> String {
+    if prompt.chars().count() > 38 {
+        format!("{}...", prompt.chars().take(35).collect::<String>())
+    } else {
+        prompt.to_string()
+    }
+}
+
 fn print_tree(records: &[schema::Record], root: Option<&str>) {
     use std::collections::{HashMap, HashSet};
 
@@ -364,5 +371,29 @@ fn walk(
         for (i, c) in kids.iter().enumerate() {
             walk(c, &child_prefix, false, i == kids.len() - 1, children);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_prompt;
+
+    #[test]
+    fn passes_through_when_within_limit() {
+        assert_eq!(short_prompt("hello"), "hello");
+    }
+
+    #[test]
+    fn truncates_long_ascii() {
+        assert_eq!(short_prompt(&"a".repeat(50)), format!("{}...", "a".repeat(35)));
+    }
+
+    #[test]
+    fn does_not_panic_on_multibyte_boundary() {
+        // 40 Japanese chars = 120 bytes; byte index 35 falls mid-codepoint, so
+        // the old `&prompt[..35]` slice panicked. char-based truncation is safe.
+        let out = short_prompt(&"あ".repeat(40));
+        assert_eq!(out, format!("{}...", "あ".repeat(35)));
+        assert_eq!(out.chars().count(), 38); // 35 chars + "..."
     }
 }
