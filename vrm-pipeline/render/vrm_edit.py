@@ -111,20 +111,29 @@ def _run_vrm_export(vrm_path: str):
     )
 
 
-def _apply_expressions(armature, adjustments: dict, spec_version: str) -> None:
+def _apply_expressions(armature, adjustments: dict, spec_version: str) -> dict:
     """
     Apply expression weights from adjustments['expressions'] to the VRM armature.
     Safe-skips any expression key that doesn't exist in the model.
+
+    Returns an accounting dict ``{"expressions": {"requested": N, "applied": M}}``
+    so callers can detect a silently-ineffective edit (requested > 0, applied 0).
     """
     expressions = adjustments.get("expressions", {})
+    requested = len(expressions)
+    applied = 0
+
+    def _account():
+        return {"expressions": {"requested": requested, "applied": applied}}
+
     if not expressions:
-        return
+        return _account()
 
     ext = getattr(armature.data, "vrm_addon_extension", None)
     if ext is None:
         print("[vrm_edit] WARNING: armature has no vrm_addon_extension, skipping expressions",
               file=sys.stderr)
-        return
+        return _account()
 
     # VRM 1.x
     if spec_version.startswith("1"):
@@ -132,17 +141,17 @@ def _apply_expressions(armature, adjustments: dict, spec_version: str) -> None:
         if vrm1 is None:
             print("[vrm_edit] WARNING: vrm1 not found in extension, skipping expressions",
                   file=sys.stderr)
-            return
+            return _account()
         exprs = getattr(vrm1, "expressions", None)
         if exprs is None:
             print("[vrm_edit] WARNING: vrm1.expressions not found, skipping expressions",
                   file=sys.stderr)
-            return
+            return _account()
         preset = getattr(exprs, "preset", None)
         if preset is None:
             print("[vrm_edit] WARNING: vrm1.expressions.preset not found, skipping expressions",
                   file=sys.stderr)
-            return
+            return _account()
 
         for key, value in expressions.items():
             expr_obj = getattr(preset, key, None)
@@ -158,59 +167,64 @@ def _apply_expressions(armature, adjustments: dict, spec_version: str) -> None:
                     if hasattr(expr_obj, "weight"):
                         expr_obj.weight = float(value)
                 print(f"[vrm_edit] INFO: set VRM1 expression '{key}' = {value}", file=sys.stderr)
+                applied += 1
             except Exception as exc:
                 print(f"[vrm_edit] WARNING: failed to set expression '{key}': {exc}",
                       file=sys.stderr)
 
-    else:
-        # VRM 0.x - uses blend_shape_master / blend_shape_groups
-        vrm0 = getattr(ext, "vrm0", None)
-        if vrm0 is None:
-            # Some versions expose it directly
-            vrm0 = ext
+        return _account()
 
-        blend_shape_master = getattr(vrm0, "blend_shape_master", None)
-        if blend_shape_master is None:
-            print("[vrm_edit] WARNING: blend_shape_master not found, skipping expressions",
+    # VRM 0.x - uses blend_shape_master / blend_shape_groups
+    vrm0 = getattr(ext, "vrm0", None)
+    if vrm0 is None:
+        # Some versions expose it directly
+        vrm0 = ext
+
+    blend_shape_master = getattr(vrm0, "blend_shape_master", None)
+    if blend_shape_master is None:
+        print("[vrm_edit] WARNING: blend_shape_master not found, skipping expressions",
+              file=sys.stderr)
+        return _account()
+
+    blend_shape_groups = getattr(blend_shape_master, "blend_shape_groups", None)
+    if blend_shape_groups is None:
+        print("[vrm_edit] WARNING: blend_shape_groups not found, skipping expressions",
+              file=sys.stderr)
+        return _account()
+
+    # Map common expression names to VRM0 preset names
+    vrm0_preset_map = {
+        "happy": ["joy", "happy"],
+        "angry": ["angry", "anger"],
+        "sad": ["sorrow", "sad"],
+        "relaxed": ["relaxed", "fun"],
+        "surprised": ["surprised", "surprise"],
+        "blink": ["blink", "blink_l"],
+    }
+
+    for key, value in expressions.items():
+        lookup_names = vrm0_preset_map.get(key, [key])
+        found = False
+        for group in blend_shape_groups:
+            group_name = getattr(group, "name", "").lower()
+            group_preset = getattr(group, "preset_name", "").lower()
+            if any(n in group_name or n == group_preset for n in lookup_names):
+                try:
+                    if hasattr(group, "preview"):
+                        group.preview = float(value)
+                    print(f"[vrm_edit] INFO: set VRM0 blend_shape '{group.name}' = {value}",
+                          file=sys.stderr)
+                    found = True
+                    applied += 1
+                except Exception as exc:
+                    print(f"[vrm_edit] WARNING: failed to set blend_shape '{key}': {exc}",
+                          file=sys.stderr)
+                break
+        if not found:
+            print(f"[vrm_edit] INFO: expression '{key}' not found in VRM0 blend shapes, skipping",
                   file=sys.stderr)
-            return
 
-        blend_shape_groups = getattr(blend_shape_master, "blend_shape_groups", None)
-        if blend_shape_groups is None:
-            print("[vrm_edit] WARNING: blend_shape_groups not found, skipping expressions",
-                  file=sys.stderr)
-            return
-
-        # Map common expression names to VRM0 preset names
-        vrm0_preset_map = {
-            "happy": ["joy", "happy"],
-            "angry": ["angry", "anger"],
-            "sad": ["sorrow", "sad"],
-            "relaxed": ["relaxed", "fun"],
-            "surprised": ["surprised", "surprise"],
-            "blink": ["blink", "blink_l"],
-        }
-
-        for key, value in expressions.items():
-            lookup_names = vrm0_preset_map.get(key, [key])
-            found = False
-            for group in blend_shape_groups:
-                group_name = getattr(group, "name", "").lower()
-                group_preset = getattr(group, "preset_name", "").lower()
-                if any(n in group_name or n == group_preset for n in lookup_names):
-                    try:
-                        if hasattr(group, "preview"):
-                            group.preview = float(value)
-                        print(f"[vrm_edit] INFO: set VRM0 blend_shape '{group.name}' = {value}",
-                              file=sys.stderr)
-                        found = True
-                    except Exception as exc:
-                        print(f"[vrm_edit] WARNING: failed to set blend_shape '{key}': {exc}",
-                              file=sys.stderr)
-                    break
-            if not found:
-                print(f"[vrm_edit] INFO: expression '{key}' not found in VRM0 blend shapes, skipping",
-                      file=sys.stderr)
+    return _account()
 
 
 def _material_matches_category(mat_name: str, category: str) -> bool:
@@ -305,16 +319,22 @@ def _set_material_base_color(mat, rgba: list, spec_version: str) -> None:
               file=sys.stderr)
 
 
-def _apply_materials(adjustments: dict, spec_version: str) -> None:
+def _apply_materials(adjustments: dict, spec_version: str) -> dict:
     """
     Apply material color adjustments from adjustments['materials'].
     Matches materials by name heuristic, skips unmatched.
+
+    Returns ``{"materials": {"requested": N, "applied": M}}`` where *applied*
+    counts requested categories that matched at least one material — so a color
+    instruction that hit no material is detectable as a silent no-op.
     """
     import bpy
 
     materials_adj = adjustments.get("materials", {})
+    requested = len(materials_adj)
+    applied = 0
     if not materials_adj:
-        return
+        return {"materials": {"requested": 0, "applied": 0}}
 
     for category, rgba in materials_adj.items():
         matched = False
@@ -324,20 +344,27 @@ def _apply_materials(adjustments: dict, spec_version: str) -> None:
             if _material_matches_category(mat.name, category):
                 _set_material_base_color(mat, rgba, spec_version)
                 matched = True
-        if not matched:
+        if matched:
+            applied += 1
+        else:
             print(f"[vrm_edit] INFO: no material matched category '{category}', skipping",
                   file=sys.stderr)
 
+    return {"materials": {"requested": requested, "applied": applied}}
 
-def _apply_height_scale(adjustments: dict) -> None:
+
+def _apply_height_scale(adjustments: dict) -> dict:
     """
     Apply uniform height_scale to the root armature (or root objects).
+
+    Returns ``{"height_scale": {"requested": N, "applied": M}}`` (N/M are 0 or 1)
+    so an unscalable model is not reported as a successful resize.
     """
     import bpy
 
     height_scale = adjustments.get("height_scale")
     if height_scale is None:
-        return
+        return {"height_scale": {"requested": 0, "applied": 0}}
 
     scale = float(height_scale)
     scaled = False
@@ -364,6 +391,8 @@ def _apply_height_scale(adjustments: dict) -> None:
         print("[vrm_edit] WARNING: no armature or root object found for height_scale",
               file=sys.stderr)
 
+    return {"height_scale": {"requested": 1, "applied": 1 if scaled else 0}}
+
 
 def _bpy_main() -> None:
     """
@@ -388,6 +417,8 @@ def _bpy_main() -> None:
     parser.add_argument("--out", required=True, help="Path for output .vrm file")
     parser.add_argument("--adjustments-file", required=True,
                         help="Path to JSON file containing adjustments dict")
+    parser.add_argument("--report-file", default=None,
+                        help="Optional path to write an applied-vs-requested JSON report")
     args = parser.parse_args(script_args)
 
     in_vrm = os.path.abspath(args.in_vrm)
@@ -449,26 +480,44 @@ def _bpy_main() -> None:
     print(f"[vrm_edit] VRM spec_version: {spec_version!r}", file=sys.stderr)
 
     # -----------------------------------------------------------------
-    # Apply adjustments (each section is safe-skip on error)
+    # Apply adjustments (each section is safe-skip on error) and record an
+    # applied-vs-requested account so the wrapper can reject silent no-ops.
     # -----------------------------------------------------------------
+    report: dict = {}
+
     if armature is not None:
         try:
-            _apply_expressions(armature, adjustments, spec_version)
+            report.update(_apply_expressions(armature, adjustments, spec_version))
         except Exception as exc:
             print(f"[vrm_edit] WARNING: expressions apply failed: {exc}", file=sys.stderr)
+            report["expressions"] = {
+                "requested": len(adjustments.get("expressions", {})), "applied": 0}
     else:
         print("[vrm_edit] WARNING: no armature found, skipping expression adjustments",
               file=sys.stderr)
+        report["expressions"] = {
+            "requested": len(adjustments.get("expressions", {})), "applied": 0}
 
     try:
-        _apply_materials(adjustments, spec_version)
+        report.update(_apply_materials(adjustments, spec_version))
     except Exception as exc:
         print(f"[vrm_edit] WARNING: materials apply failed: {exc}", file=sys.stderr)
+        report["materials"] = {
+            "requested": len(adjustments.get("materials", {})), "applied": 0}
 
     try:
-        _apply_height_scale(adjustments)
+        report.update(_apply_height_scale(adjustments))
     except Exception as exc:
         print(f"[vrm_edit] WARNING: height_scale apply failed: {exc}", file=sys.stderr)
+        report["height_scale"] = {
+            "requested": 0 if adjustments.get("height_scale") is None else 1, "applied": 0}
+
+    if args.report_file:
+        try:
+            with open(args.report_file, "w", encoding="utf-8") as rf:
+                json.dump(report, rf)
+        except OSError as exc:
+            print(f"[vrm_edit] WARNING: could not write report file: {exc}", file=sys.stderr)
 
     # -----------------------------------------------------------------
     # Export VRM
@@ -563,6 +612,16 @@ def edit_vrm(
         json.dump(adjustments, tmp)
         adjustments_file = tmp.name
 
+    # Blender writes an applied-vs-requested report here; we read it back to
+    # reject edits that matched zero targets (silent no-ops).
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".report.json",
+        delete=False,
+        encoding="utf-8",
+    ) as rtmp:
+        report_file = rtmp.name
+
     try:
         cmd = [
             blender_path,
@@ -572,32 +631,71 @@ def edit_vrm(
             "--in", str(in_vrm),
             "--out", str(out_vrm),
             "--adjustments-file", adjustments_file,
+            "--report-file", report_file,
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            stderr_tail = result.stderr[-2000:] if result.stderr else ""
+            stdout_tail = result.stdout[-1000:] if result.stdout else ""
+            raise RuntimeError(
+                f"Blender exited with code {result.returncode} during VRM edit.\n"
+                f"--- stderr (tail) ---\n{stderr_tail}\n"
+                f"--- stdout (tail) ---\n{stdout_tail}"
+            )
+
+        # Output guarantee: a clean Blender exit does not prove a valid VRM was
+        # written.  Reject a missing/empty/corrupt file before reporting success.
+        from render.vrm_utils import assert_valid_glb
+
+        assert_valid_glb(out_vrm)
+
+        # Reject silent no-ops: an explicitly requested adjustment that matched
+        # zero targets means the user's instruction had no effect.
+        _assert_adjustments_applied(report_file)
     finally:
-        # Always clean up the temp file
-        try:
-            os.unlink(adjustments_file)
-        except OSError:
-            pass
-
-    if result.returncode != 0:
-        stderr_tail = result.stderr[-2000:] if result.stderr else ""
-        stdout_tail = result.stdout[-1000:] if result.stdout else ""
-        raise RuntimeError(
-            f"Blender exited with code {result.returncode} during VRM edit.\n"
-            f"--- stderr (tail) ---\n{stderr_tail}\n"
-            f"--- stdout (tail) ---\n{stdout_tail}"
-        )
-
-    # Output guarantee: a clean Blender exit does not prove a valid VRM was
-    # written.  Reject a missing/empty/corrupt file before reporting success.
-    from render.vrm_utils import assert_valid_glb
-
-    assert_valid_glb(out_vrm)
+        # Always clean up the temp files
+        for _f in (adjustments_file, report_file):
+            try:
+                os.unlink(_f)
+            except OSError:
+                pass
 
     return str(out_vrm)
+
+
+def _assert_adjustments_applied(report_file: str) -> None:
+    """
+    Raise ``RuntimeError`` when the Blender-side report shows a requested
+    adjustment section matched zero targets (requested > 0, applied == 0).
+
+    A missing/empty/unparseable report is treated as "no accounting available"
+    and skipped — this keeps the guard backward-compatible with callers/mocks
+    that do not produce a report.
+    """
+    try:
+        with open(report_file, "r", encoding="utf-8") as rf:
+            report = json.load(rf)
+    except (OSError, ValueError):
+        return
+
+    if not isinstance(report, dict):
+        return
+
+    empties = [
+        section
+        for section, counts in report.items()
+        if isinstance(counts, dict)
+        and counts.get("requested", 0) > 0
+        and counts.get("applied", 0) == 0
+    ]
+    if empties:
+        raise RuntimeError(
+            "VRM edit applied no changes for requested section(s): "
+            f"{', '.join(sorted(empties))}. The instruction matched no targets "
+            f"in the model (report: {report}). Refusing to report success."
+        )
 
 
 # ---------------------------------------------------------------------------
