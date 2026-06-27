@@ -284,7 +284,7 @@ fn main() -> Result<()> {
 
             let all = db::all_embeddings(&db_path)?;
             let mut results = search::top_k_similar(&query_vec, &all, top_k);
-            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+            search::sort_by_score_desc(&mut results);
             for r in &results {
                 println!("{:.4}  {}", r.score, r.id);
             }

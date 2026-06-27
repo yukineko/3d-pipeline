@@ -28,9 +28,18 @@ pub fn top_k_similar(query: &[f64], rows: &[EmbeddingRow], k: usize) -> Vec<Simi
             score: cosine(query, &r.vec),
         })
         .collect();
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    sort_by_score_desc(&mut scored);
     scored.truncate(k);
     scored
+}
+
+/// Sort similarity results by score, highest first.
+///
+/// Uses `f64::total_cmp` so a `NaN` score (reachable when an embedding vector
+/// contains non-finite components) yields a well-defined total order instead of
+/// panicking — `partial_cmp(..).unwrap()` would panic on `NaN`.
+pub fn sort_by_score_desc(results: &mut [SimilarResult]) {
+    results.sort_by(|a, b| b.score.total_cmp(&a.score));
 }
 
 #[cfg(test)]
@@ -93,5 +102,26 @@ mod tests {
             .collect();
         let r = top_k_similar(&q, &rows, 3);
         assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn sort_by_score_desc_does_not_panic_on_nan() {
+        // A NaN score (reachable when an embedding contains non-finite values)
+        // made the old `partial_cmp(..).unwrap()` panic. total_cmp gives a
+        // total order instead. Finite scores must still sort highest-first and
+        // every input element is preserved.
+        let mut results = vec![
+            SimilarResult { id: "nan".into(), score: f64::NAN },
+            SimilarResult { id: "low".into(), score: 0.1 },
+            SimilarResult { id: "high".into(), score: 0.9 },
+        ];
+        sort_by_score_desc(&mut results); // must not panic
+        assert_eq!(results.len(), 3);
+        let finite: Vec<&str> = results
+            .iter()
+            .filter(|r| r.score.is_finite())
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(finite, vec!["high", "low"]);
     }
 }
