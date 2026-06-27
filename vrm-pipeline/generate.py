@@ -312,11 +312,101 @@ def _http_post_multipart(url: str, headers: dict, fields: dict, files: dict) -> 
         ) from e
 
 
-def _http_get(url: str, headers: dict) -> bytes:
-    """GET request, returns raw bytes. Raises RuntimeError on failure."""
+def _url_host(url: str) -> str:
+    """Return the lower-cased host of *url*, or "" if it has none."""
+    return (urllib.parse.urlsplit(url).hostname or "").lower()
+
+
+def _allowed_download_hosts(endpoint: str) -> set:
+    """
+    Hosts we are willing to send the Rodin/Hyper3D Bearer token to.
+
+    Derived from the *configured* endpoint host (the one we already trust with
+    the key for submit/poll), optionally extended by a comma-separated
+    HYPER3D_DOWNLOAD_HOSTS env allow-list for legitimate CDN/download hosts.
+    """
+    hosts = set()
+    host = _url_host(endpoint)
+    if host:
+        hosts.add(host)
+    for part in os.environ.get("HYPER3D_DOWNLOAD_HOSTS", "").split(","):
+        part = part.strip().lower()
+        if part:
+            hosts.add(part)
+    return hosts
+
+
+def _assert_url_allowed(url: str, allowed_hosts: set) -> None:
+    """
+    Refuse to send an authenticated request to an untrusted URL.
+
+    A compromised or attacker-controlled API endpoint (HYPER3D_ENDPOINT is
+    env-overridable) can return an arbitrary `glb_url` in its JSON response.
+    Blindly attaching `Authorization: Bearer <api_key>` to that URL would leak
+    the API key to the attacker (SSRF / credential-exfiltration). Validate the
+    scheme and host before any authenticated send:
+
+      * scheme must be http/https (blocks file://, ftp://, gopher://, data:, …)
+      * a host must be present
+      * the host must be in *allowed_hosts* (reject cross-origin)
+
+    Raises RuntimeError (no request is made) on any violation.
+    """
+    parts = urllib.parse.urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise RuntimeError(
+            f"Refusing authenticated request to non-http(s) URL "
+            f"(scheme={scheme!r}): {url}"
+        )
+    host = (parts.hostname or "").lower()
+    if not host:
+        raise RuntimeError(f"Refusing authenticated request to URL with no host: {url}")
+    if host not in allowed_hosts:
+        raise RuntimeError(
+            f"Refusing to send credentials to cross-origin host {host!r} "
+            f"(allowed: {sorted(allowed_hosts)}). Returned URL: {url}. "
+            f"If this host is legitimate, add it to HYPER3D_DOWNLOAD_HOSTS."
+        )
+
+
+class _HostAllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """
+    Re-validate every redirect target against the host allow-list.
+
+    urllib follows 3xx redirects and re-sends request headers (including
+    Authorization) to the new location, so a server-side redirect is a second
+    SSRF vector even when the original URL was on an allowed host. Reject any
+    redirect that points off the allow-list before it is followed.
+    """
+
+    def __init__(self, allowed_hosts: set):
+        self._allowed_hosts = allowed_hosts
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _assert_url_allowed(newurl, self._allowed_hosts)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _http_get(url: str, headers: dict, allowed_hosts: set = None) -> bytes:
+    """
+    GET request, returns raw bytes. Raises RuntimeError on failure.
+
+    When *allowed_hosts* is provided, the URL (and any redirect target) is
+    validated against it before the request is sent, and the Authorization
+    header is only ever transmitted to an allow-listed host.
+    """
+    if allowed_hosts is not None:
+        _assert_url_allowed(url, allowed_hosts)
+        opener = urllib.request.build_opener(
+            _HostAllowlistRedirectHandler(allowed_hosts)
+        )
+        open_fn = opener.open
+    else:
+        open_fn = urllib.request.urlopen
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req) as resp:
+        with open_fn(req) as resp:
             return resp.read()
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", errors="replace")
@@ -543,9 +633,14 @@ def generate_via_hyper3d(
     else:
         raise RuntimeError(f"Unknown Hyper3D mode: {mode}")
 
-    # Download the GLB file
+    # Download the GLB file.
+    # `glb_url` comes from the (potentially compromised) API response JSON, so
+    # validate its host against the configured-endpoint allow-list before
+    # attaching the Bearer token — otherwise an attacker-controlled endpoint
+    # could redirect the credentialed download and steal the API key (SSRF).
+    allowed_hosts = _allowed_download_hosts(endpoint)
     print(f"[Hyper3D] Downloading GLB from {glb_url} ...", file=sys.stderr)
-    glb_bytes = _http_get(glb_url, headers=auth_headers)
+    glb_bytes = _http_get(glb_url, headers=auth_headers, allowed_hosts=allowed_hosts)
 
     image_stem = os.path.splitext(image_name)[0]
     glb_filename = f"hyper3d_{image_stem}_{job_id or 'result'}.glb"
