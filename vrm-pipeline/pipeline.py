@@ -454,6 +454,7 @@ def handle_prompt(path: Path, args) -> str:
     vroid_edit = sidecar_params.pop("vroid_edit", False)
     base_vrm = sidecar_params.pop("base_vrm", None)
     change = sidecar_params.pop("change", None)
+    preset = sidecar_params.pop("preset", None)
     prompt = _enrich_prompt(prompt, args)
 
     if vroid_edit:
@@ -461,10 +462,11 @@ def handle_prompt(path: Path, args) -> str:
         # apply them to the parent's base VRM via Blender (VRM addon), re-export.
         if not base_vrm:
             raise RuntimeError("vroid_edit requires base_vrm in sidecar params")
-        from vroid_params import infer_vrm_adjustments  # lazy: pulls in Gemini SDK
+        from vroid_params import resolve_vrm_adjustments  # lazy: pulls in Gemini SDK
         from render.vrm_edit import edit_vrm  # lazy: avoids bpy import at module load
-        adjustments = infer_vrm_adjustments(
-            change or prompt, image_path=image_ref, model=args.gen_model
+        from presets import DEFAULT_PRESET_NAME  # lazy: get default preset name
+        adjustments = resolve_vrm_adjustments(
+            change or prompt, preset_name=preset, image_path=image_ref, model=args.gen_model
         )
         vrm_path = output_dir / "generated" / f"{stem}.vrm"
         vrm_path.parent.mkdir(parents=True, exist_ok=True)
@@ -477,6 +479,7 @@ def handle_prompt(path: Path, args) -> str:
             "vroid_edit": True,
             "base_vrm": str(base_vrm),
             "change": change,
+            "preset": preset or DEFAULT_PRESET_NAME,
             "adjustments": adjustments,
             "vrm_path": str(vrm_path),
             "blender_version": summary.get("blender_version"),

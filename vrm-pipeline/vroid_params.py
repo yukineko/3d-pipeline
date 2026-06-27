@@ -4,9 +4,21 @@ vroid_params.py — Infer VRM character adjustment values from a text prompt
 
 Public API:
     infer_vrm_adjustments(prompt, image_path=None, model="gemini-2.5-flash") -> dict
+        Deprecated; kept for backward compatibility. Returns a dict with ALL keys
+        present (expressions filled with 0.0 for missing, height_scale defaulted to 1.0).
 
-The returned dict always conforms to the following schema (values clamped/defaulted):
+    infer_vrm_overrides(prompt, image_path=None, model="gemini-2.5-flash") -> dict
+        Extract ONLY the keys Gemini explicitly emitted (sparse dict). Missing keys
+        are omitted entirely, not defaulted.
 
+    resolve_vrm_adjustments(prompt, preset_name=None, image_path=None, model="gemini-2.5-flash") -> dict
+        New main entry: layer Gemini overrides onto a vetted preset baseline.
+        Returns a complete adjusted dict guaranteed to match the preset's style
+        when Gemini omits sections.
+
+Schemas:
+
+    infer_vrm_adjustments returns (always complete):
     {
         "expressions": {
             "happy":     0..1,
@@ -24,6 +36,21 @@ The returned dict always conforms to the following schema (values clamped/defaul
             "outfit": [r, g, b, a],
         },
         "height_scale": float,  # clamped to 0.5..2.0, default 1.0
+    }
+
+    infer_vrm_overrides returns (sparse, only keys Gemini emitted):
+    {
+        # Any subset of:
+        "expressions": { subset of 6 keys },
+        "materials": { subset of 4 keys },
+        "height_scale": float,
+    }
+
+    resolve_vrm_adjustments returns (complete via preset + overrides merge):
+    {
+        "expressions": {6 keys from preset, overridden by Gemini},
+        "materials": {4 keys from preset, overridden by Gemini},
+        "height_scale": float,
     }
 
 Environment:
@@ -255,3 +282,119 @@ def infer_vrm_adjustments(
         ) from exc
 
     return _normalize_result(raw_dict)
+
+
+def infer_vrm_overrides(
+    prompt: str,
+    image_path: str | None = None,
+    model: str = "gemini-2.5-flash",
+) -> dict:
+    """
+    Extract ONLY the keys Gemini explicitly emitted from a prompt/image.
+
+    This is the sparse variant: missing keys are omitted entirely, NOT defaulted.
+    The returned dict may contain any subset of the full schema:
+    {
+        "expressions": {subset of 6 keys},  # omitted if empty
+        "materials": {subset of 4 keys},     # omitted if empty
+        "height_scale": float,               # omitted if not present
+    }
+
+    Args:
+        prompt:     Natural language description of the character or mood.
+        image_path: Optional path to a reference image (PNG, JPEG, WEBP, etc.).
+        model:      Gemini model name (default: "gemini-2.5-flash").
+
+    Returns:
+        A sparse dict containing only keys Gemini returned.
+
+    Raises:
+        RuntimeError: If GEMINI_API_KEY is not set or the API call fails.
+        ValueError:   If the Gemini response cannot be parsed as JSON.
+    """
+    raw_text = _call_gemini(prompt, image_path, model)
+
+    json_text = _extract_json(raw_text)
+    try:
+        raw_dict = json.loads(json_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Gemini response is not valid JSON.\n"
+            f"Response text: {raw_text!r}\n"
+            f"Parse error: {exc}"
+        ) from exc
+
+    # Build a sparse dict with only keys Gemini actually emitted
+    result = {}
+
+    # --- expressions (sparse) ---
+    raw_expr = raw_dict.get("expressions", {})
+    if isinstance(raw_expr, dict) and raw_expr:
+        expressions = {}
+        for key in EXPRESSION_KEYS:
+            if key in raw_expr:
+                expressions[key] = _clamp(raw_expr[key], 0.0, 1.0)
+        if expressions:
+            result["expressions"] = expressions
+
+    # --- materials (sparse) ---
+    raw_mat = raw_dict.get("materials", {})
+    if isinstance(raw_mat, dict) and raw_mat:
+        materials = {}
+        for key in MATERIAL_KEYS:
+            if key in raw_mat:
+                materials[key] = _normalize_color(raw_mat[key])
+        if materials:
+            result["materials"] = materials
+
+    # --- height_scale (sparse) ---
+    if "height_scale" in raw_dict:
+        result["height_scale"] = _clamp(raw_dict["height_scale"], 0.5, 2.0)
+
+    return result
+
+
+def resolve_vrm_adjustments(
+    prompt: str,
+    preset_name: str | None = None,
+    image_path: str | None = None,
+    model: str = "gemini-2.5-flash",
+) -> dict:
+    """
+    Resolve VRM adjustments by layering Gemini overrides onto a preset baseline.
+
+    The preset provides a vetted, intentional style (all 6 expressions, all 4 materials,
+    height_scale). Gemini's response is treated as a sparse set of overrides that are
+    layered ON TOP via preset-aware merge semantics.
+
+    This ensures that a vague or empty prompt still produces a styled character:
+    the preset's non-zero expression weights and material colors survive when
+    Gemini omits those sections.
+
+    Args:
+        prompt:        Natural language description of the character or mood.
+        preset_name:   Name of the preset to use as baseline. If None, uses
+                       presets.DEFAULT_PRESET_NAME.
+        image_path:    Optional path to a reference image (PNG, JPEG, WEBP, etc.).
+        model:         Gemini model name (default: "gemini-2.5-flash").
+
+    Returns:
+        A complete adjustments dict guaranteed to have all 6 expressions,
+        all 4 materials, and height_scale (all from preset with Gemini's
+        explicitly-emitted keys overridden).
+
+    Raises:
+        RuntimeError: If GEMINI_API_KEY is not set or the API call fails.
+        ValueError:   If the Gemini response cannot be parsed as JSON.
+        KeyError:     If preset_name is not in the registry.
+    """
+    import presets  # lazy import (works for both direct runs and tests)
+
+    # Load the preset baseline
+    base = presets.get_preset(preset_name or presets.DEFAULT_PRESET_NAME)
+
+    # Extract only what Gemini explicitly emitted
+    overrides = infer_vrm_overrides(prompt, image_path=image_path, model=model)
+
+    # Layer overrides onto preset (override-not-replace semantics)
+    return presets.merge_adjustments(base, overrides)

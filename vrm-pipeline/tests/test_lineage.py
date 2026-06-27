@@ -225,10 +225,11 @@ class TestHandlePromptVroidFlow(unittest.TestCase):
 
             infer_calls = {}
 
-            def fake_infer(text, image_path=None, model=None):
+            def fake_resolve(text, preset_name=None, image_path=None, model=None):
                 infer_calls["text"] = text
+                infer_calls["preset_name"] = preset_name
                 infer_calls["image_path"] = image_path
-                return {"expressions": {"happy": 1.0}, "materials": {"hair": [1, 0.8, 0, 1]}, "height_scale": 1.0}
+                return {"expressions": {"happy": 1.0, "angry": 0.0, "sad": 0.0, "relaxed": 0.0, "surprised": 0.0, "blink": 0.0}, "materials": {"hair": [1, 0.8, 0, 1], "skin": [0.95, 0.82, 0.72, 1.0], "eye": [0.85, 0.60, 0.20, 1.0], "outfit": [0.90, 0.40, 0.35, 1.0]}, "height_scale": 1.0}
 
             edit_calls = {}
 
@@ -244,9 +245,10 @@ class TestHandlePromptVroidFlow(unittest.TestCase):
                 insert_calls["asset_type"] = params.get("asset_type")
                 insert_calls["adjustments"] = params.get("adjustments")
                 insert_calls["base_vrm"] = params.get("base_vrm")
+                insert_calls["preset"] = params.get("preset")
                 return "rec-vroid"
 
-            with mock.patch("vroid_params.infer_vrm_adjustments", side_effect=fake_infer), \
+            with mock.patch("vroid_params.resolve_vrm_adjustments", side_effect=fake_resolve), \
                  mock.patch("render.vrm_edit.edit_vrm", side_effect=fake_edit) as edit_mock, \
                  mock.patch.object(pipeline, "_render_vrm", return_value={"blender_version": "4.x", "render_sha256": "z"}), \
                  mock.patch.object(pipeline, "_enrich_prompt", side_effect=lambda p, a: p), \
@@ -255,7 +257,7 @@ class TestHandlePromptVroidFlow(unittest.TestCase):
                 rid = pipeline.handle_prompt(prompt_path, args)
 
             self.assertEqual(rid, "rec-vroid")
-            # adjustment inferred from the change instruction
+            # adjustment inferred from the change instruction (passed to resolve_vrm_adjustments)
             self.assertEqual(infer_calls["text"], "髪を金色に、笑顔に")
             # edit_vrm applied to the parent's base VRM with the inferred adjustments
             self.assertTrue(edit_mock.called)
@@ -266,6 +268,8 @@ class TestHandlePromptVroidFlow(unittest.TestCase):
             self.assertEqual(insert_calls["asset_type"], "vrm")
             self.assertEqual(insert_calls["base_vrm"], "/abs/base.vrm")
             self.assertIsNotNone(insert_calls["adjustments"])
+            # preset should be recorded (default preset since none specified in params)
+            self.assertIsNotNone(insert_calls["preset"])
 
 
 if __name__ == "__main__":
