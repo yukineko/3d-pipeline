@@ -644,5 +644,45 @@ class TestRunVrmExportFallback(unittest.TestCase):
         self.assertIn("VRM_Addon_for_Blender", str(ctx.exception))
 
 
+class TestSanitizeHeightScale(unittest.TestCase):
+    """_sanitize_height_scale clamps valid factors and rejects unsafe ones.
+
+    edit_vrm() is a public API; a 0/negative/NaN/inf height_scale must not reach
+    bpy (it would collapse or invert the avatar). This helper is pure (no bpy).
+    """
+
+    def test_in_range_value_unchanged(self):
+        from render.vrm_edit import _sanitize_height_scale
+        self.assertEqual(_sanitize_height_scale(1.5), 1.5)
+
+    def test_too_large_clamped_to_max(self):
+        from render.vrm_edit import _sanitize_height_scale, _HEIGHT_SCALE_MAX
+        self.assertEqual(_sanitize_height_scale(5.0), _HEIGHT_SCALE_MAX)
+
+    def test_too_small_clamped_to_min(self):
+        from render.vrm_edit import _sanitize_height_scale, _HEIGHT_SCALE_MIN
+        self.assertEqual(_sanitize_height_scale(0.2), _HEIGHT_SCALE_MIN)
+
+    def test_zero_rejected(self):
+        from render.vrm_edit import _sanitize_height_scale
+        with self.assertRaises(ValueError):
+            _sanitize_height_scale(0)
+
+    def test_negative_rejected(self):
+        from render.vrm_edit import _sanitize_height_scale
+        with self.assertRaises(ValueError):
+            _sanitize_height_scale(-1.0)
+
+    def test_nan_rejected(self):
+        from render.vrm_edit import _sanitize_height_scale
+        with self.assertRaises(ValueError):
+            _sanitize_height_scale(float("nan"))
+
+    def test_inf_rejected(self):
+        from render.vrm_edit import _sanitize_height_scale
+        with self.assertRaises(ValueError):
+            _sanitize_height_scale(float("inf"))
+
+
 if __name__ == "__main__":
     unittest.main()

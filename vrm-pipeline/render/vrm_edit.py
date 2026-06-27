@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -353,6 +354,29 @@ def _apply_materials(adjustments: dict, spec_version: str) -> dict:
     return {"materials": {"requested": requested, "applied": applied}}
 
 
+# Safe bounds for a uniform height scale, kept in sync with the inference-layer
+# clamp in vroid_params (0.5..2.0). edit_vrm() is a public API that can be called
+# with arbitrary adjustments, so the bpy layer must guard independently.
+_HEIGHT_SCALE_MIN = 0.5
+_HEIGHT_SCALE_MAX = 2.0
+
+
+def _sanitize_height_scale(height_scale) -> float:
+    """
+    Coerce a requested height_scale into a safe, applicable factor.
+
+    Rejects non-finite (NaN/inf) and non-positive values with ValueError — a
+    scale of 0, a negative number, or NaN would collapse or invert the avatar.
+    Finite positive values are clamped to [_HEIGHT_SCALE_MIN, _HEIGHT_SCALE_MAX].
+    """
+    scale = float(height_scale)
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError(
+            f"height_scale must be a finite positive number, got {height_scale!r}"
+        )
+    return max(_HEIGHT_SCALE_MIN, min(_HEIGHT_SCALE_MAX, scale))
+
+
 def _apply_height_scale(adjustments: dict) -> dict:
     """
     Apply uniform height_scale to the root armature (or root objects).
@@ -366,7 +390,7 @@ def _apply_height_scale(adjustments: dict) -> dict:
     if height_scale is None:
         return {"height_scale": {"requested": 0, "applied": 0}}
 
-    scale = float(height_scale)
+    scale = _sanitize_height_scale(height_scale)
     scaled = False
 
     # Try armature objects first
