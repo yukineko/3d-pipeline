@@ -1,5 +1,7 @@
 # vrm-pipeline
 
+[![CI](https://github.com/yukineko/3d-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/yukineko/3d-pipeline/actions/workflows/ci.yml)
+
 VRM 生成改善パイプライン — `prompt × 自分の傾向 × 結果評価` の蓄積で生成を改善する個人ツール。
 
 ## 概要

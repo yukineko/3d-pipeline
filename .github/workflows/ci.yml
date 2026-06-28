@@ -1,0 +1,86 @@
+name: CI
+
+# Run the test suites and linters on every PR and on pushes to main, so that
+# regressions in the Blender / Gemini wrappers or the Rust crates are caught
+# automatically instead of shipping silently (the project was previously
+# tested only by hand). See backlog e447701c.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel an in-progress run for the same ref when a new commit is pushed.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # The whole project (Python modules + Cargo workspace) lives under
+    # vrm-pipeline/; run every step from there.
+    working-directory: vrm-pipeline
+
+jobs:
+  python-tests:
+    name: Python (unittest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # NOTE: requirements.txt pulls heavy, slow deps (torch, transformers,
+      # google-generativeai, Pillow/imagehash). The unittest suite is designed
+      # to run WITHOUT them — it stubs bpy and the optional heavy modules — so
+      # we deliberately do NOT `pip install -r requirements.txt` here. Keeping
+      # the job stdlib-only makes it fast and deterministic.
+      - name: Run unittest suite
+        run: python -m unittest discover -s tests -v
+
+  rust-tests:
+    name: Rust (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vrm-pipeline
+      # The `dist` crate is currently an unimplemented stub (src/lib.rs is just
+      # `// stub`) but still ships an integration test asserting a full pHash
+      # API, so `cargo test --workspace` fails to COMPILE. Exclude it until the
+      # crate is implemented (tracked separately); ledger + watch are real and
+      # are the meaningful coverage here.
+      - name: cargo test (workspace, excluding stub `dist` crate)
+        run: cargo test --workspace --exclude dist
+
+  lint:
+    name: Lint (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vrm-pipeline
+      - name: Install ruff
+        run: pip install ruff
+      # Lint steps are ADVISORY for now (continue-on-error): the existing
+      # codebase has not been linted, rustfmt reports diffs, and clippy emits
+      # warnings. Surfacing them in the PR log without blocking merges lets the
+      # lint debt be paid down incrementally; flip these to blocking once the
+      # tree is clean.
+      - name: ruff check
+        run: ruff check .
+        continue-on-error: true
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+        continue-on-error: true
+      - name: cargo clippy
+        run: cargo clippy --workspace --exclude dist --all-targets
+        continue-on-error: true
