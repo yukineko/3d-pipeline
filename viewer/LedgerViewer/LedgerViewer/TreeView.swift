@@ -94,13 +94,8 @@ struct NodeCardView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.secondary.opacity(0.12))
-                Image(systemName: "cube.transparent")
-                    .foregroundStyle(.tertiary)
-            }
-            .frame(width: 48, height: 48)
+            ThumbnailView(dir: record.r0Ref)
+                .frame(width: 48, height: 48)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 4) {
