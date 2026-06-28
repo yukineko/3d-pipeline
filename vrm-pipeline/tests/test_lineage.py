@@ -234,7 +234,7 @@ class TestHandlePromptVroidFlow(unittest.TestCase):
 
             edit_calls = {}
 
-            def fake_edit(in_vrm, out_vrm, adjustments, blender_path=None):
+            def fake_edit(in_vrm, out_vrm, adjustments, blender_path=None, apply_log_dir=None):
                 edit_calls["in_vrm"] = in_vrm
                 edit_calls["adjustments"] = adjustments
                 return str(out_vrm)

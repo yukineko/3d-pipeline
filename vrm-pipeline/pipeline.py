@@ -494,7 +494,8 @@ def handle_prompt(path: Path, args) -> str:
         )
         vrm_path = output_dir / "generated" / f"{stem}.vrm"
         vrm_path.parent.mkdir(parents=True, exist_ok=True)
-        edit_vrm(base_vrm, vrm_path, adjustments, blender_path=args.blender_path)
+        edit_vrm(base_vrm, vrm_path, adjustments, blender_path=args.blender_path,
+                 apply_log_dir=output_dir)
         print(f"[pipeline] edited VRM -> {vrm_path}")
 
         validation = _validate_vrm_gate(vrm_path, output_dir)

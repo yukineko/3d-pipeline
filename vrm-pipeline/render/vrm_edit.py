@@ -828,6 +828,7 @@ def _bpy_main() -> None:
     # applied-vs-requested account so the wrapper can reject silent no-ops.
     # -----------------------------------------------------------------
     report: dict = {}
+    report["spec_version"] = spec_version
 
     if armature is not None:
         try:
@@ -892,6 +893,7 @@ def edit_vrm(
     out_vrm: str | Path,
     adjustments: dict,
     blender_path: str | None = None,
+    apply_log_dir: str | Path | None = None,
 ) -> str:
     """
     Apply adjustments to a VRM file by launching Blender headless.
@@ -919,6 +921,10 @@ def edit_vrm(
         Blender binary path.  When *None*, the value of the ``BLENDER_PATH``
         environment variable is used; if that is also unset, ``"blender"`` is
         tried (must be on PATH).
+    apply_log_dir:
+        Optional directory to persist the apply report as ``apply_log.json``
+        (best-effort).  When *None*, no report is persisted.  Persistence
+        failures are logged as warnings and never fail the edit.
 
     Returns
     -------
@@ -1004,6 +1010,24 @@ def edit_vrm(
         # Reject silent no-ops: an explicitly requested adjustment that matched
         # zero targets means the user's instruction had no effect.
         _assert_adjustments_applied(report_file)
+
+        # Best-effort: persist the apply report next to the ledger record so a
+        # non-expert can later inspect requested-vs-applied counts. Persistence
+        # failures must never fail the edit itself.
+        if apply_log_dir is not None:
+            try:
+                with open(report_file, "r", encoding="utf-8") as rf:
+                    report_dict = json.load(rf)
+                from render import obs
+                obs.write_apply_log(apply_log_dir, report_dict)
+            except Exception as exc:  # noqa: BLE001 - best-effort persistence
+                try:
+                    from render import obs
+                    obs.get_logger("vrm_edit").warning(
+                        "could not persist apply_log.json: %s", exc)
+                except Exception:
+                    print(f"[vrm_edit] WARNING: could not persist apply_log.json: {exc}",
+                          file=sys.stderr)
     finally:
         # Always clean up the temp files
         for _f in (adjustments_file, report_file):
