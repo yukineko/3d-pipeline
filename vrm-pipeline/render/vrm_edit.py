@@ -381,20 +381,123 @@ def _apply_expressions(armature, adjustments: dict, spec_version: str) -> dict:
     return _account()
 
 
-def _material_matches_category(mat_name: str, category: str) -> bool:
+# Token sets for material classification. Lowercased substring match against the
+# material name (and, when available, MToon/texture image node names). These cover
+# both VRoid Studio coded names (e.g. ``N00_000_00_Body_00_SKIN``) and ad-hoc
+# English names, since the trailing MToon suffix (SKIN/HAIR/CLOTH/EYE/FACE) is itself
+# a substring (e.g. "skin" in "...SKIN").
+_CATEGORY_TOKENS = {
+    "eye": ["eye", "eyes", "iris", "pupil", "sclera", "cornea", "eyeline",
+            "eyelash", "eyelashout", "eyebrow", "highlight"],
+    "hair": ["hair", "hairs", "fur"],
+    "outfit": ["cloth", "clothes", "clothing", "outfit", "costume", "dress",
+               "shirt", "pants", "jacket", "uniform", "wear", "tops", "bottoms",
+               "onepiece", "shoes", "accessory"],
+    "skin": ["skin", "body", "face", "flesh"],
+}
+
+# Japanese / hand-named VRM tokens. Substring match on the raw (non-lowercased) name.
+_CATEGORY_TOKENS_JP = {
+    "eye": ["目", "瞳", "まつ", "睫", "眉"],
+    "hair": ["髪"],
+    "outfit": ["服", "衣装", "靴"],
+    "skin": ["肌", "顔", "体"],
+}
+
+# Precedence order. Evaluated first-wins so that eye-region parts whose VRoid suffix
+# is FACE (Eyeline/Eyelash/Eyebrow) classify as eye rather than skin(face).
+_CATEGORY_PRECEDENCE = ("eye", "hair", "outfit", "skin")
+
+
+def _gather_texture_names(mat) -> list:
     """
-    Heuristic: does the material name suggest it belongs to the given category?
+    Best-effort collection of MToon/texture image node names from a Blender
+    material object. Every structure access is defensively guarded so a missing
+    or garbage node tree never raises — on any failure an empty list is returned.
     """
-    name_lower = mat_name.lower()
-    category_keywords = {
-        "hair": ["hair", "hairs", "fur"],
-        "skin": ["skin", "body", "face", "flesh"],
-        "eye": ["eye", "eyes", "iris", "pupil", "sclera", "cornea"],
-        "outfit": ["outfit", "cloth", "clothes", "clothing", "dress", "shirt",
-                   "pants", "jacket", "uniform", "costume", "wear"],
-    }
-    keywords = category_keywords.get(category, [category])
-    return any(kw in name_lower for kw in keywords)
+    names = []
+    try:
+        node_tree = getattr(mat, "node_tree", None)
+        nodes = getattr(node_tree, "nodes", None)
+        if nodes is not None:
+            for node in nodes:
+                try:
+                    n = getattr(node, "name", None)
+                    if n:
+                        names.append(str(n))
+                    img = getattr(node, "image", None)
+                    img_name = getattr(img, "name", None)
+                    if img_name:
+                        names.append(str(img_name))
+                except Exception:
+                    continue
+    except Exception:
+        return names
+    # Texture slots (legacy materials).
+    try:
+        slots = getattr(mat, "texture_slots", None)
+        if slots is not None:
+            for slot in slots:
+                try:
+                    sn = getattr(slot, "name", None)
+                    if sn:
+                        names.append(str(sn))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return names
+
+
+def _classify_material(mat_name: str, mat=None):
+    """
+    Classify a material into ``'hair' | 'skin' | 'eye' | 'outfit' | None``.
+
+    VRoid Studio exports coded names like ``N00_000_00_Body_00_SKIN`` and
+    ``N00_000_00_Eyeline_00_FACE``; Japanese/hand-named VRMs use ``髪``/``肌``/``瞳``
+    etc. Classification is evaluated in precedence order **eye → hair → outfit →
+    skin** so that eye-region parts carrying a ``FACE`` suffix still resolve to eye.
+
+    Signal sources, in order:
+      a. VRoid/English part & suffix tokens (case-insensitive substring on name).
+      b. Japanese tokens (substring on the raw name).
+      c. MToon/texture image node names on ``mat`` (same token sets), used as a
+         secondary hint when the name alone is ambiguous.
+    Returns None if nothing matches.
+    """
+    name_lower = (mat_name or "").lower()
+
+    # (a) English / VRoid coded tokens.
+    for category in _CATEGORY_PRECEDENCE:
+        if any(tok in name_lower for tok in _CATEGORY_TOKENS[category]):
+            return category
+
+    # (b) Japanese tokens (raw name).
+    raw = mat_name or ""
+    for category in _CATEGORY_PRECEDENCE:
+        if any(tok in raw for tok in _CATEGORY_TOKENS_JP[category]):
+            return category
+
+    # (c) Secondary hint from MToon/texture image names.
+    if mat is not None:
+        for tex_name in _gather_texture_names(mat):
+            tl = tex_name.lower()
+            for category in _CATEGORY_PRECEDENCE:
+                if any(tok in tl for tok in _CATEGORY_TOKENS[category]):
+                    return category
+            for category in _CATEGORY_PRECEDENCE:
+                if any(tok in tex_name for tok in _CATEGORY_TOKENS_JP[category]):
+                    return category
+
+    return None
+
+
+def _material_matches_category(mat_name: str, category: str, mat=None) -> bool:
+    """
+    Does the material name (and optional material object) suggest it belongs to
+    the given category? Backward-compatible 2-arg form is preserved.
+    """
+    return _classify_material(mat_name, mat) == category
 
 
 def _set_material_base_color(mat, rgba: list, spec_version: str) -> None:
@@ -495,14 +598,19 @@ def _apply_materials(adjustments: dict, spec_version: str) -> dict:
         for mat in bpy.data.materials:
             if mat is None:
                 continue
-            if _material_matches_category(mat.name, category):
+            if _material_matches_category(mat.name, category, mat):
                 _set_material_base_color(mat, rgba, spec_version)
                 matched = True
         if matched:
             applied += 1
         else:
-            print(f"[vrm_edit] INFO: no material matched category '{category}', skipping",
-                  file=sys.stderr)
+            available = [m.name for m in bpy.data.materials if m]
+            if available:
+                print(f"[vrm_edit] WARNING: no material matched category '{category}', "
+                      f"skipping. Available materials: {available}", file=sys.stderr)
+            else:
+                print(f"[vrm_edit] WARNING: no material matched category '{category}', "
+                      f"skipping. no materials in scene", file=sys.stderr)
 
     return {"materials": {"requested": requested, "applied": applied}}
 
