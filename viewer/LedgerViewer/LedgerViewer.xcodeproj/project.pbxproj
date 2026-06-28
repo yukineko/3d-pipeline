@@ -9,12 +9,14 @@
 /* Begin PBXBuildFile section */
 		1A0000000000000000000012 /* LedgerViewerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000010 /* LedgerViewerApp.swift */; };
 		1A0000000000000000000013 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000011 /* ContentView.swift */; };
+		1A0000000000000000000017 /* LedgerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000016 /* LedgerStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		1A0000000000000000000006 /* LedgerViewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LedgerViewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A0000000000000000000010 /* LedgerViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LedgerViewerApp.swift; sourceTree = "<group>"; };
 		1A0000000000000000000011 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		1A0000000000000000000016 /* LedgerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LedgerStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -49,6 +51,7 @@
 			children = (
 				1A0000000000000000000010 /* LedgerViewerApp.swift */,
 				1A0000000000000000000011 /* ContentView.swift */,
+				1A0000000000000000000016 /* LedgerStore.swift */,
 			);
 			path = LedgerViewer;
 			sourceTree = "<group>";
@@ -123,6 +126,7 @@
 			files = (
 				1A0000000000000000000012 /* LedgerViewerApp.swift in Sources */,
 				1A0000000000000000000013 /* ContentView.swift in Sources */,
+				1A0000000000000000000017 /* LedgerStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
