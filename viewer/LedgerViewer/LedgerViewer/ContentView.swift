@@ -11,6 +11,11 @@ struct ContentView: View {
 
     private let store = LedgerStore()
 
+    private var selectedRecord: LedgerRecord? {
+        guard let selectedID, let forest else { return nil }
+        return forest.records.first { $0.id == selectedID }
+    }
+
     var body: some View {
         Group {
             if let forest, !forest.records.isEmpty {
@@ -20,6 +25,14 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 480)
+        .inspector(isPresented: .constant(selectedRecord != nil)) {
+            if let record = selectedRecord {
+                InspectorView(record: record)
+                    .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
+            } else {
+                Text("Select a node").foregroundStyle(.secondary)
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Text("VRM Ledger Tree")

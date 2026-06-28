@@ -37,6 +37,25 @@ extension LedgerRecord {
     /// `outcome.edit_dist_phash` if present (R0→R1 pHash edit distance).
     var editDistPHash: Double? { jsonObject(outcome)["edit_dist_phash"] as? Double }
 
+    /// `outcome.edit_dist_embed` if present (R0→R1 embedding cosine distance).
+    var editDistEmbed: Double? { jsonObject(outcome)["edit_dist_embed"] as? Double }
+
+    /// `generation_params` re-serialized as sorted, pretty JSON for display.
+    var prettyGenerationParams: String { LedgerRecord.prettyJSON(generationParams) }
+
+    /// Pretty-print a raw JSON string (sorted keys); returns the raw text if it
+    /// is not valid JSON or is an empty object.
+    static func prettyJSON(_ raw: String) -> String {
+        guard let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data),
+              JSONSerialization.isValidJSONObject(obj),
+              let pretty = try? JSONSerialization.data(
+                withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+              let s = String(data: pretty, encoding: .utf8)
+        else { return raw }
+        return s
+    }
+
     /// VLM tags stored at `derived.tag` (shape is tolerant: array or {tags:[...]}).
     var tags: [String] {
         let tag = jsonObject(derived)["tag"]
