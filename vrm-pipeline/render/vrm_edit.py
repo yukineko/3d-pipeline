@@ -1073,6 +1073,47 @@ def _assert_adjustments_applied(report_file: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Host-side CLI (plain Python; no bpy).  The host wrapper `edit_vrm()` spawns
+# Blender itself at runtime, so argument parsing here needs no Blender.
+# ---------------------------------------------------------------------------
+
+def _host_main() -> None:
+    """Plain-Python CLI entry: parse args, load the adjustments JSON, and call
+    ``edit_vrm()`` which launches Blender headlessly."""
+    parser = argparse.ArgumentParser(
+        description="Edit an existing VRM headlessly via the Blender VRM addon.",
+    )
+    parser.add_argument("--in", dest="in_vrm", required=True,
+                        help="Path to the input .vrm file.")
+    parser.add_argument("--out", dest="out", required=True,
+                        help="Destination path for the output .vrm file.")
+    parser.add_argument("--adjustments-file", dest="adjustments_file", required=True,
+                        help="Path to a JSON file containing the adjustments dict.")
+    parser.add_argument("--blender", dest="blender", default=None,
+                        help="Path to the Blender executable (default: auto).")
+    parser.add_argument("--apply-log-dir", dest="apply_log_dir", default=None,
+                        help="Directory to write the apply-log into (optional).")
+    args = parser.parse_args()
+
+    try:
+        with open(args.adjustments_file, "r", encoding="utf-8") as af:
+            adjustments = json.load(af)
+    except (OSError, ValueError) as exc:
+        print(f"error: failed to read adjustments file "
+              f"{args.adjustments_file!r}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    out_path = edit_vrm(
+        args.in_vrm,
+        args.out,
+        adjustments,
+        blender_path=args.blender,
+        apply_log_dir=args.apply_log_dir,
+    )
+    print(out_path)
+
+
+# ---------------------------------------------------------------------------
 # When executed inside Blender as a --python script
 # ---------------------------------------------------------------------------
 
@@ -1083,5 +1124,8 @@ try:
 except ImportError:
     _INSIDE_BLENDER = False
 
-if _INSIDE_BLENDER and __name__ == "__main__":
-    _bpy_main()
+if __name__ == "__main__":
+    if _INSIDE_BLENDER:
+        _bpy_main()
+    else:
+        _host_main()

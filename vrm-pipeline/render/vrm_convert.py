@@ -264,6 +264,29 @@ def glb_to_vrm(
 
 
 # ---------------------------------------------------------------------------
+# Host-side CLI (plain Python; no bpy).  The host wrapper `glb_to_vrm()` spawns
+# Blender itself at runtime, so argument parsing here needs no Blender.
+# ---------------------------------------------------------------------------
+
+def _host_main() -> None:
+    """Plain-Python CLI entry: parse args and call ``glb_to_vrm()`` which
+    launches Blender headlessly to convert a GLB into a VRM."""
+    parser = argparse.ArgumentParser(
+        description="Convert a GLB file to VRM headlessly via Blender.",
+    )
+    parser.add_argument("--glb", dest="glb", required=True,
+                        help="Path to the input .glb file.")
+    parser.add_argument("--out", dest="out", required=True,
+                        help="Destination path for the output .vrm file.")
+    parser.add_argument("--blender", dest="blender", default=None,
+                        help="Path to the Blender executable (default: auto).")
+    args = parser.parse_args()
+
+    out_path = glb_to_vrm(args.glb, args.out, blender_path=args.blender)
+    print(out_path)
+
+
+# ---------------------------------------------------------------------------
 # When executed inside Blender as a --python script
 # ---------------------------------------------------------------------------
 
@@ -274,5 +297,8 @@ try:
 except ImportError:
     _INSIDE_BLENDER = False
 
-if _INSIDE_BLENDER and __name__ == "__main__":
-    _bpy_main()
+if __name__ == "__main__":
+    if _INSIDE_BLENDER:
+        _bpy_main()
+    else:
+        _host_main()
