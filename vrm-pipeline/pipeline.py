@@ -234,6 +234,25 @@ def _ledger_insert(
     return out.strip()
 
 
+def _validate_vrm_gate(vrm_path: Path, output_dir: Path) -> dict:
+    """
+    VRM output-quality gate, run before ``_ledger_insert`` so a structurally
+    broken avatar never enters the lineage.
+
+    Writes the validation report to ``output_dir/validation.json`` (alongside
+    ``manifest.json``, so it rides into the ledger as part of ``r0_dir``) and
+    returns the report dict on success.  Raises ``RuntimeError`` — blocking the
+    ledger insert — when validation finds *errors* (no VRM extension, a missing
+    required humanoid bone, a dangling bone node, glTF-Validator structural
+    errors).  T-pose deviations are recorded as warnings and do not block,
+    since ``height_scale`` edits legitimately perturb the rig.
+    """
+    from render.vrm_validate import assert_valid_vrm  # lazy: keep module import light
+
+    report_path = Path(output_dir) / "validation.json"
+    return assert_valid_vrm(vrm_path, report_path=report_path)
+
+
 def _pop_parent_id(params: dict) -> str | None:
     """Pull parent_id out of merged params so it rides as a lineage link, not a gen param."""
     return params.pop("parent_id", None)
@@ -473,6 +492,10 @@ def handle_prompt(path: Path, args) -> str:
         edit_vrm(base_vrm, vrm_path, adjustments, blender_path=args.blender_path)
         print(f"[pipeline] edited VRM -> {vrm_path}")
 
+        validation = _validate_vrm_gate(vrm_path, output_dir)
+        if validation.get("warnings"):
+            print(f"[pipeline] VRM validation warnings: {len(validation['warnings'])}")
+
         summary = _render_vrm(vrm_path, output_dir, args)
         gen_params = {
             "asset_type": "vrm",
@@ -482,6 +505,7 @@ def handle_prompt(path: Path, args) -> str:
             "preset": preset or DEFAULT_PRESET_NAME,
             "adjustments": adjustments,
             "vrm_path": str(vrm_path),
+            "validation": validation,
             "blender_version": summary.get("blender_version"),
             "render_sha256": summary.get("render_sha256"),
         }
@@ -494,10 +518,15 @@ def handle_prompt(path: Path, args) -> str:
         glb_to_vrm(glb_path, vrm_path, blender_path=args.blender_path)
         print(f"[pipeline] converted GLB -> VRM: {vrm_path}")
 
+        validation = _validate_vrm_gate(vrm_path, output_dir)
+        if validation.get("warnings"):
+            print(f"[pipeline] VRM validation warnings: {len(validation['warnings'])}")
+
         summary = _render_vrm(vrm_path, output_dir, args)
         gen_params.update({
             "asset_type": "vrm",
             "vrm_path": str(vrm_path),
+            "validation": validation,
             "blender_version": summary.get("blender_version"),
             "render_sha256": summary.get("render_sha256"),
         })

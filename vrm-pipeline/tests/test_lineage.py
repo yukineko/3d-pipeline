@@ -185,6 +185,7 @@ class TestHandlePromptImageFlow(unittest.TestCase):
                  mock.patch.object(pipeline, "_render_vrm", return_value={"blender_version": "4.x", "render_sha256": "abc"}), \
                  mock.patch.object(pipeline, "_enrich_prompt", side_effect=lambda p, a: p), \
                  mock.patch.object(pipeline, "_ledger_insert", side_effect=fake_insert), \
+                 mock.patch.object(pipeline, "_validate_vrm_gate", return_value={"ok": True, "warnings": []}), \
                  mock.patch.object(pipeline, "_post_process"), \
                  mock.patch("render.vrm_convert.glb_to_vrm", return_value="/tmp/out.vrm") as conv:
                 rid = pipeline.handle_prompt(prompt_path, args)
@@ -253,6 +254,7 @@ class TestHandlePromptVroidFlow(unittest.TestCase):
                  mock.patch.object(pipeline, "_render_vrm", return_value={"blender_version": "4.x", "render_sha256": "z"}), \
                  mock.patch.object(pipeline, "_enrich_prompt", side_effect=lambda p, a: p), \
                  mock.patch.object(pipeline, "_ledger_insert", side_effect=fake_insert), \
+                 mock.patch.object(pipeline, "_validate_vrm_gate", return_value={"ok": True, "warnings": []}), \
                  mock.patch.object(pipeline, "_post_process"):
                 rid = pipeline.handle_prompt(prompt_path, args)
 
