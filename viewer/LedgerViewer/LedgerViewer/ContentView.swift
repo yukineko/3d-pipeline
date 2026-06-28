@@ -1,18 +1,29 @@
 import SwiftUI
 
-/// Root view: loads the ledger forest (read-only) and renders it as a tree.
-///
-/// Loading is a plain load-on-appear for now; T7 adds live refresh on DB change
-/// and T9 hardens the empty/error states.
+/// Root view: loads the ledger forest (read-only) and renders it as a tree,
+/// with explicit states for a missing DB, an empty ledger, and read errors so
+/// the app never shows a blank window or crashes.
 struct ContentView: View {
-    @State private var forest: LedgerForest?
-    @State private var loadError: String?
+    enum LoadState {
+        case loading
+        case missingDB
+        case empty
+        case failed(String)
+        case loaded(LedgerForest)
+    }
+
+    @State private var state: LoadState = .loading
     @State private var selectedID: String?
     @State private var searchText = ""
     @State private var adoptedOnly = false
     @StateObject private var watcher = LedgerWatcher(path: LedgerStore.defaultPath)
 
     private let store = LedgerStore()
+
+    private var forest: LedgerForest? {
+        if case .loaded(let f) = state { return f }
+        return nil
+    }
 
     private var selectedRecord: LedgerRecord? {
         guard let selectedID, let forest else { return nil }
@@ -48,7 +59,7 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if let forest, !forest.records.isEmpty {
+            if case .loaded(let forest) = state {
                 TreeView(forest: forest, selectedID: $selectedID, filter: treeFilter)
             } else {
                 statusView
@@ -66,8 +77,7 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                Text("VRM Ledger Tree")
-                    .font(.headline)
+                Text("VRM Ledger Tree").font(.headline)
             }
             ToolbarItem(placement: .primaryAction) {
                 if let forest {
@@ -81,6 +91,7 @@ struct ContentView: View {
                     Label("Adopted only", systemImage: adoptedOnly ? "checkmark.seal.fill" : "checkmark.seal")
                 }
                 .toggleStyle(.button)
+                .disabled(forest == nil)
                 .help("Show only adopted records (and their ancestors)")
             }
             ToolbarItem(placement: .primaryAction) {
@@ -94,34 +105,68 @@ struct ContentView: View {
 
     @ViewBuilder private var statusView: some View {
         VStack(spacing: 12) {
-            Image(systemName: loadError == nil ? "point.3.connected.trianglepath.dotted" : "exclamationmark.triangle")
+            Image(systemName: statusIcon)
                 .font(.system(size: 44, weight: .light))
-                .foregroundStyle(.secondary)
-            Text(loadError ?? "No records in ledger")
+                .foregroundStyle(statusIsError ? .orange : .secondary)
+            Text(statusTitle)
+                .font(.title3)
+            Text(statusDetail)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
             Text(store.path)
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(.tertiary)
                 .textSelection(.enabled)
+            Button { load() } label: { Label("Reload", systemImage: "arrow.clockwise") }
+                .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
     }
 
-    private func load() {
-        guard store.exists else {
-            loadError = "No ledger database found"
-            forest = nil
-            return
+    private var statusIsError: Bool { if case .failed = state { return true }; return false }
+
+    private var statusIcon: String {
+        switch state {
+        case .loading: return "hourglass"
+        case .missingDB: return "tray"
+        case .empty: return "point.3.connected.trianglepath.dotted"
+        case .failed: return "exclamationmark.triangle"
+        case .loaded: return "checkmark"
         }
+    }
+
+    private var statusTitle: String {
+        switch state {
+        case .loading: return "Loading…"
+        case .missingDB: return "No ledger yet"
+        case .empty: return "Ledger is empty"
+        case .failed: return "Couldn’t read the ledger"
+        case .loaded: return ""
+        }
+    }
+
+    private var statusDetail: String {
+        switch state {
+        case .loading: return "Reading the ledger database."
+        case .missingDB:
+            return "No ledger database was found. It appears here automatically once you generate your first VRM through the pipeline."
+        case .empty:
+            return "The ledger exists but has no records yet. The tree fills in as VRMs are generated."
+        case .failed(let message): return message
+        case .loaded: return ""
+        }
+    }
+
+    private func load() {
+        guard store.exists else { state = .missingDB; return }
         do {
-            forest = try store.loadForest()
-            loadError = nil
+            let forest = try store.loadForest()
+            state = forest.records.isEmpty ? .empty : .loaded(forest)
         } catch {
-            loadError = "\(error)"
-            forest = nil
+            state = .failed("\(error)")
         }
     }
 }
