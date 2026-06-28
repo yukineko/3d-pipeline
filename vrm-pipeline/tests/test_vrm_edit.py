@@ -644,6 +644,122 @@ class TestRunVrmExportFallback(unittest.TestCase):
         self.assertIn("VRM_Addon_for_Blender", str(ctx.exception))
 
 
+class _FakeObject:
+    """Lightweight bpy object stub for _apply_height_scale tests.
+
+    Tracks scale assignment and select_set() calls so the test can assert the
+    armature + child meshes are selected and baked.
+    """
+
+    def __init__(self, name, obj_type, parent=None, modifiers=None):
+        self.name = name
+        self.type = obj_type
+        self.parent = parent
+        self.modifiers = modifiers or []
+        self.scale = (1.0, 1.0, 1.0)
+        self.selected = None
+        self.select_set = MagicMock()
+
+
+class _FakeArmatureModifier:
+    def __init__(self, armature):
+        self.type = "ARMATURE"
+        self.object = armature
+
+
+def _make_fake_bpy(objects):
+    fake_bpy = MagicMock()
+    fake_bpy.data.objects = objects
+    return fake_bpy
+
+
+class TestApplyHeightScaleBake(unittest.TestCase):
+    """_apply_height_scale must bake the scale into geometry via transform_apply.
+
+    A non-unit armature/root node scale is dropped by VRM0/VRM1 export, so the
+    resize has to be applied to the mesh data itself.
+    """
+
+    def _apply(self, fake_bpy, adjustments):
+        with patch.dict(sys.modules, {"bpy": fake_bpy}):
+            from render.vrm_edit import _apply_height_scale
+            return _apply_height_scale(adjustments)
+
+    def test_no_height_scale_noop(self):
+        fake_bpy = _make_fake_bpy([])
+        result = self._apply(fake_bpy, {})
+        self.assertEqual(result, {"height_scale": {"requested": 0, "applied": 0}})
+        fake_bpy.ops.object.transform_apply.assert_not_called()
+
+    def test_armature_and_child_meshes_baked(self):
+        armature = _FakeObject("Armature", "ARMATURE")
+        # parented mesh
+        body = _FakeObject("Body", "MESH", parent=armature)
+        # mesh bound via armature modifier (not parented to armature)
+        hair = _FakeObject("Hair", "MESH",
+                           modifiers=[_FakeArmatureModifier(armature)])
+        # unrelated mesh — must NOT be selected
+        other_arm = _FakeObject("OtherArm", "ARMATURE")
+        prop = _FakeObject("Prop", "MESH", modifiers=[_FakeArmatureModifier(other_arm)])
+
+        fake_bpy = _make_fake_bpy([armature, body, hair, prop, other_arm])
+        result = self._apply(fake_bpy, {"height_scale": 1.3})
+
+        self.assertEqual(result, {"height_scale": {"requested": 1, "applied": 1}})
+        self.assertEqual(armature.scale, (1.3, 1.3, 1.3))
+
+        # transform_apply called with scale baked into geometry
+        fake_bpy.ops.object.transform_apply.assert_called_once_with(
+            location=False, rotation=False, scale=True)
+
+        # armature + its driven meshes selected; unrelated prop not selected
+        armature.select_set.assert_any_call(True)
+        body.select_set.assert_any_call(True)
+        hair.select_set.assert_any_call(True)
+        prop.select_set.assert_not_called()
+
+        # armature is the active object
+        self.assertIs(fake_bpy.context.view_layer.objects.active, armature)
+
+    def test_fallback_root_object_baked(self):
+        # No armature; a parentless mesh is the root.
+        root = _FakeObject("Root", "MESH", parent=None)
+        fake_bpy = _make_fake_bpy([root])
+        result = self._apply(fake_bpy, {"height_scale": 0.8})
+
+        self.assertEqual(result, {"height_scale": {"requested": 1, "applied": 1}})
+        self.assertEqual(root.scale, (0.8, 0.8, 0.8))
+        fake_bpy.ops.object.transform_apply.assert_called_once_with(
+            location=False, rotation=False, scale=True)
+        root.select_set.assert_any_call(True)
+        self.assertIs(fake_bpy.context.view_layer.objects.active, root)
+
+    def test_no_target_object_not_applied(self):
+        fake_bpy = _make_fake_bpy([])
+        result = self._apply(fake_bpy, {"height_scale": 1.2})
+        self.assertEqual(result, {"height_scale": {"requested": 1, "applied": 0}})
+        fake_bpy.ops.object.transform_apply.assert_not_called()
+
+    def test_bake_failure_keeps_object_scale_fallback(self):
+        armature = _FakeObject("Armature", "ARMATURE")
+        fake_bpy = _make_fake_bpy([armature])
+        fake_bpy.ops.object.transform_apply.side_effect = RuntimeError("no context")
+
+        result = self._apply(fake_bpy, {"height_scale": 1.5})
+        # bake failed but object scale was set → still reported as applied
+        self.assertEqual(result, {"height_scale": {"requested": 1, "applied": 1}})
+        self.assertEqual(armature.scale, (1.5, 1.5, 1.5))
+
+    def test_invalid_height_scale_rejected_before_transform_apply(self):
+        for bad in (0, -1.0, float("nan"), float("inf")):
+            armature = _FakeObject("Armature", "ARMATURE")
+            fake_bpy = _make_fake_bpy([armature])
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    self._apply(fake_bpy, {"height_scale": bad})
+                fake_bpy.ops.object.transform_apply.assert_not_called()
+
+
 class TestSanitizeHeightScale(unittest.TestCase):
     """_sanitize_height_scale clamps valid factors and rejects unsafe ones.
 

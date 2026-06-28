@@ -377,9 +377,50 @@ def _sanitize_height_scale(height_scale) -> float:
     return max(_HEIGHT_SCALE_MIN, min(_HEIGHT_SCALE_MAX, scale))
 
 
+def _child_meshes_of(bpy, armature) -> list:
+    """
+    Return MESH objects driven by ``armature``: either parented to it, or bound
+    via an ARMATURE modifier that targets it. These must be baked together with
+    the armature so the geometry is scaled, not just the bone transforms.
+    """
+    children = []
+    for obj in bpy.data.objects:
+        if getattr(obj, "type", None) != "MESH":
+            continue
+        if getattr(obj, "parent", None) is armature:
+            children.append(obj)
+            continue
+        for mod in getattr(obj, "modifiers", []) or []:
+            if getattr(mod, "type", None) == "ARMATURE" and getattr(mod, "object", None) is armature:
+                children.append(obj)
+                break
+    return children
+
+
+def _bake_scale_into_geometry(bpy, primary, objects) -> None:
+    """
+    Apply the pending object scale of ``objects`` into their geometry via
+    ``transform_apply(scale=True)``, with ``primary`` as the active object.
+
+    VRM export does not reliably carry a non-unit root/armature node scale
+    (VRM0 bakes it into bone world translation; VRM1 may drop a non-unit root
+    TRS), so the scale must be baked into the mesh data itself. Raises on
+    failure; the caller keeps the object-scale fallback.
+    """
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in objects:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = primary
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+
 def _apply_height_scale(adjustments: dict) -> dict:
     """
     Apply uniform height_scale to the root armature (or root objects).
+
+    The requested scale is set on the object and then baked into geometry with
+    ``transform_apply(scale=True)`` so the resize survives VRM0/VRM1 export
+    (where a non-unit node scale is otherwise dropped or normalized).
 
     Returns ``{"height_scale": {"requested": N, "applied": M}}`` (N/M are 0 or 1)
     so an unscalable model is not reported as a successful resize.
@@ -392,12 +433,17 @@ def _apply_height_scale(adjustments: dict) -> dict:
 
     scale = _sanitize_height_scale(height_scale)
     scaled = False
+    bake_targets = None
+    bake_primary = None
 
-    # Try armature objects first
+    # Try armature objects first: scale the armature and bake it together with
+    # the meshes it drives so the geometry (not just bones) is resized.
     for obj in bpy.data.objects:
         if obj.type == "ARMATURE":
             obj.scale = (scale, scale, scale)
             scaled = True
+            bake_primary = obj
+            bake_targets = [obj] + _child_meshes_of(bpy, obj)
             print(f"[vrm_edit] INFO: set armature '{obj.name}' scale = {scale}", file=sys.stderr)
             break
 
@@ -407,6 +453,8 @@ def _apply_height_scale(adjustments: dict) -> dict:
             if obj.parent is None and obj.type in ("EMPTY", "MESH"):
                 obj.scale = (scale, scale, scale)
                 scaled = True
+                bake_primary = obj
+                bake_targets = [obj]
                 print(f"[vrm_edit] INFO: set root object '{obj.name}' scale = {scale}",
                       file=sys.stderr)
                 break
@@ -414,6 +462,17 @@ def _apply_height_scale(adjustments: dict) -> dict:
     if not scaled:
         print("[vrm_edit] WARNING: no armature or root object found for height_scale",
               file=sys.stderr)
+        return {"height_scale": {"requested": 1, "applied": 0}}
+
+    # Bake the object scale into geometry. If the op fails (e.g. an unexpected
+    # headless context), keep the object-scale fallback rather than aborting.
+    try:
+        _bake_scale_into_geometry(bpy, bake_primary, bake_targets)
+        print(f"[vrm_edit] INFO: baked height_scale into geometry of "
+              f"{len(bake_targets)} object(s)", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - op failures vary by Blender build
+        print(f"[vrm_edit] WARNING: transform_apply(scale) failed ({exc!r}); "
+              f"keeping object-scale fallback", file=sys.stderr)
 
     return {"height_scale": {"requested": 1, "applied": 1 if scaled else 0}}
 
