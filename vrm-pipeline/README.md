@@ -232,6 +232,74 @@ vrm-watch \
 
 ---
 
+## はじめてのアバター (prompt → VRM)
+
+このプロジェクトの前提は「ユーザーの美的センスは低い」こと。だから凝った指定は不要で、
+**プロンプトを書くだけ**でよい。良デフォルトは吟味済みの**プリセット**が供給し、Gemini は
+その上に**まばらな上書き (sparse override)** を重ねるだけ。この層構造は
+`vroid_params.resolve_vrm_adjustments(prompt, preset_name=..., image_path=..., model=...)`
+が担い、プリセットの baseline に Gemini が明示した差分だけを載せて完全な調整 dict を返す。
+
+調整 dict のスキーマ（`vroid_params.py` 参照）:
+
+```jsonc
+{
+  "expressions": { "happy": 0..1, "angry": 0..1, "sad": 0..1,
+                   "relaxed": 0..1, "surprised": 0..1, "blink": 0..1 },
+  "materials":   { "hair": [r,g,b,a], "skin": [r,g,b,a],
+                   "eye": [r,g,b,a], "outfit": [r,g,b,a] },  // 各成分 0..1
+  "height_scale": 0.5..2.0   // 既定 1.0
+}
+```
+
+### VRoid 編集フロー（おすすめ）
+
+既存の VRoid VRM を**ベース**に、プロンプト由来の差分だけを Blender (VRM addon) で適用して
+再エクスポートする経路。`pipeline.py` の `handle_prompt` が `<stem>.params.json` に `base_vrm`
+を見つけると、この分岐を選ぶ。
+
+1. **drop ファイルを作る** — `derive.py` で `<name>.prompt` + `<name>.params.json` を書き出す
+   （`§ derive.py` 参照）。または手書きで `my_avatar.prompt`（変更指示テキスト）と
+   `my_avatar.params.json`（最低限 `{"vroid_edit": true, "base_vrm": "/path/to/base.vrm"}`、
+   任意で `preset` / `change` / `image_ref`）を用意する。
+
+   ```bash
+   python derive.py --parent-id <id> --change "笑顔多め、少し背を高く" \
+     --emit-drop ./drop --name my_avatar
+   ```
+
+2. **ウォッチャーを起動** — `§6 ウォッチャー起動` と同じく `vrm-watch` を監視ディレクトリへ向ける。
+3. **2 ファイルを drop-zone に投下** — `.prompt` と `.params.json` を監視ディレクトリへ置く。
+4. **パイプラインが自動実行** — `resolve_vrm_adjustments` →
+   `edit_vrm(base_vrm, out, adjustments, blender_path=...)` → VRM 品質ゲート検証 →
+   レンダ → ledger INSERT。出力 VRM は render 出力先の
+   `renders/<stem>/generated/<stem>.vrm` に生成される。
+
+> 画像から作りたい場合は `params.json` に `image_ref` を入れると、Hyper3D で画像→GLB を生成し
+> `glb_to_vrm` で VRM 化する別分岐が走る。
+
+### 直接呼ぶ (host API)
+
+watch を介さずホスト Python から直接呼ぶこともできる。
+
+```python
+from render.vrm_edit import edit_vrm
+# edit_vrm(in_vrm, out_vrm, adjustments, blender_path=None) -> str
+out = edit_vrm("base.vrm", "out.vrm", {"expressions": {"happy": 0.8}, "height_scale": 1.05})
+
+# GLB → VRM:
+from render.vrm_convert import glb_to_vrm
+# glb_to_vrm(glb_path, vrm_path, blender_path=None) -> str
+vrm = glb_to_vrm("model.glb", "model.vrm")
+```
+
+関連環境変数:
+
+- `BLENDER_PATH` — blender バイナリの場所（`blender_path` 引数未指定時のフォールバック、既定 `blender`）。
+- `VRM_SUBPROCESS_TIMEOUT` — Blender サブプロセスのタイムアウト秒数（既定 600）。
+
+---
+
 ## 段階導入計画
 
 | Phase | 内容 | 状態 |
