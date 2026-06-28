@@ -10,6 +10,8 @@
 		1A0000000000000000000012 /* LedgerViewerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000010 /* LedgerViewerApp.swift */; };
 		1A0000000000000000000013 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000011 /* ContentView.swift */; };
 		1A0000000000000000000017 /* LedgerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000016 /* LedgerStore.swift */; };
+		1A0000000000000000000019 /* TreeLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000018 /* TreeLayout.swift */; };
+		1A000000000000000000001B /* TreeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000001A /* TreeView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -17,6 +19,8 @@
 		1A0000000000000000000010 /* LedgerViewerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LedgerViewerApp.swift; sourceTree = "<group>"; };
 		1A0000000000000000000011 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		1A0000000000000000000016 /* LedgerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LedgerStore.swift; sourceTree = "<group>"; };
+		1A0000000000000000000018 /* TreeLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreeLayout.swift; sourceTree = "<group>"; };
+		1A000000000000000000001A /* TreeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreeView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,6 +56,8 @@
 				1A0000000000000000000010 /* LedgerViewerApp.swift */,
 				1A0000000000000000000011 /* ContentView.swift */,
 				1A0000000000000000000016 /* LedgerStore.swift */,
+				1A0000000000000000000018 /* TreeLayout.swift */,
+				1A000000000000000000001A /* TreeView.swift */,
 			);
 			path = LedgerViewer;
 			sourceTree = "<group>";
@@ -127,6 +133,8 @@
 				1A0000000000000000000012 /* LedgerViewerApp.swift in Sources */,
 				1A0000000000000000000013 /* ContentView.swift in Sources */,
 				1A0000000000000000000017 /* LedgerStore.swift in Sources */,
+				1A0000000000000000000019 /* TreeLayout.swift in Sources */,
+				1A000000000000000000001B /* TreeView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

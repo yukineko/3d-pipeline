@@ -8,8 +8,8 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="$DIR/../LedgerViewer/LedgerStore.swift"
+APP="$DIR/../LedgerViewer"
 OUT="$(mktemp -d)/ledger-verify"
 
-swiftc -O "$SRC" "$DIR/main.swift" -lsqlite3 -o "$OUT"
+swiftc -O "$APP/LedgerStore.swift" "$APP/TreeLayout.swift" "$DIR/main.swift" -lsqlite3 -o "$OUT"
 "$OUT" "$@"

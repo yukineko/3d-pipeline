@@ -1,31 +1,76 @@
 import SwiftUI
 
-/// Placeholder root view for the scaffold (T1).
+/// Root view: loads the ledger forest (read-only) and renders it as a tree.
 ///
-/// Intentionally minimal: it only proves the app builds and a window opens.
-/// T2 replaces this with the ledger read layer and T3 with the tidy-tree canvas.
+/// Loading is a plain load-on-appear for now; T7 adds live refresh on DB change
+/// and T9 hardens the empty/error states.
 struct ContentView: View {
-    private var defaultLedgerPath: String {
-        (NSHomeDirectory() as NSString).appendingPathComponent(".vrm-pipeline/ledger.db")
-    }
+    @State private var forest: LedgerForest?
+    @State private var loadError: String?
+    @State private var selectedID: String?
+
+    private let store = LedgerStore()
 
     var body: some View {
+        Group {
+            if let forest, !forest.records.isEmpty {
+                TreeView(forest: forest, selectedID: $selectedID)
+            } else {
+                statusView
+            }
+        }
+        .frame(minWidth: 720, minHeight: 480)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Text("VRM Ledger Tree")
+                    .font(.headline)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                if let forest {
+                    Text("\(forest.records.count) records · \(forest.roots.count) roots")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { load() } label: { Image(systemName: "arrow.clockwise") }
+                    .help("Reload from ledger")
+            }
+        }
+        .onAppear(perform: load)
+    }
+
+    @ViewBuilder private var statusView: some View {
         VStack(spacing: 12) {
-            Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 48, weight: .light))
+            Image(systemName: loadError == nil ? "point.3.connected.trianglepath.dotted" : "exclamationmark.triangle")
+                .font(.system(size: 44, weight: .light))
                 .foregroundStyle(.secondary)
-            Text("VRM Ledger Tree Viewer")
-                .font(.title2).bold()
-            Text("read-only · arm64 · scaffold")
+            Text(loadError ?? "No records in ledger")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Text(defaultLedgerPath)
+                .multilineTextAlignment(.center)
+            Text(store.path)
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(.tertiary)
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+
+    private func load() {
+        guard store.exists else {
+            loadError = "No ledger database found"
+            forest = nil
+            return
+        }
+        do {
+            forest = try store.loadForest()
+            loadError = nil
+        } catch {
+            loadError = "\(error)"
+            forest = nil
+        }
     }
 }
 
