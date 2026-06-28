@@ -169,6 +169,43 @@ python derive.py --parent-id <id> --change "脚を金属製に" \
 `pipeline.py` は `<stem>.params.json` の `parent_id` を読み取り、INSERT 時に親へリンクする。
 つまり「起点を選んで変更 → 生成 → 系統が樹形図になる」が成立する。
 
+### パラメトリック人体生成 (MPFB2)
+
+`render/generate_body.py` は MakeHuman のマクロ修飾子を使って人体ベースメッシュを
+新規生成し、`game_engine` リグを付与・VRM humanoid ボーンを割り当て・モーフを
+ジオメトリに焼き込んで `.vrm` をエクスポートする（`vrm_edit.py` が既存 VRM を
+*編集* するのに対し、こちらは *生成* する）。
+
+実行時要件:
+
+- **MPFB2**（MakeHuman Plugin for Blender、CC0 ベースメッシュ）。`blender --addons mpfb`
+  または `bpy.ops.preferences.addon_enable(module="mpfb")` で有効化する。
+- **Blender 4.2 LTS** と **VRM_Addon_for_Blender**。
+- HumGen3D は **使わない**（有料コンテンツパックが必要なため）。
+
+正規モーフキーは `body_params.BODY_MORPH_KEYS`（gender / age / height / weight /
+muscle / proportions / bodyfat / head_size、各 0.0..1.0）。これらは
+`generate_body.MODIFIER_MAP` で MPFB2 の MakeHuman target 文字列へ対応づけるが、
+**正確な target 名は MPFB2 のバージョンで変わる**ため、実行時に MPFB2 の target
+名前空間に対して検証する必要がある（`bodyfat` は独立 target が無く universal の
+`Weight` を `weight` と共有する点に注意）。
+
+ホスト側からの利用:
+
+```python
+from render.generate_body import generate_body
+from render.body_params import resolve_body_morphs
+
+generate_body(resolve_body_morphs("背の高いアスリート体型の女性"), "/out/char.vrm")
+```
+
+Blender CLI から直接:
+
+```
+blender --background --python render/generate_body.py -- \
+  --morphs-file morphs.json --out char.vrm [--report-file report.json]
+```
+
 ### dist
 
 ```
