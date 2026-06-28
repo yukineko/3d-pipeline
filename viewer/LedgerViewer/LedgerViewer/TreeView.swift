@@ -2,9 +2,18 @@ import SwiftUI
 
 /// Interactive derivation-tree canvas: draws the forest with elbow edges and
 /// node cards, supporting pinch-zoom and drag-pan. Read-only.
+/// Active search/filter result: which nodes matched, and which are kept for
+/// context (ancestors of matches). Nil filter => show everything normally.
+struct TreeFilter {
+    let matched: Set<String>
+    let context: Set<String>
+    func isVisible(_ id: String) -> Bool { matched.contains(id) || context.contains(id) }
+}
+
 struct TreeView: View {
     let forest: LedgerForest
     @Binding var selectedID: String?
+    var filter: TreeFilter?
 
     private let nodeSize = CGSize(width: 156, height: 84)
 
@@ -22,10 +31,15 @@ struct TreeView: View {
             ZStack(alignment: .topLeading) {
                 edges(laid)
                 ForEach(laid.nodes) { node in
-                    NodeCardView(record: node.record, isSelected: selectedID == node.id)
-                        .frame(width: nodeSize.width, height: nodeSize.height)
-                        .position(node.center)
-                        .onTapGesture { selectedID = node.id }
+                    NodeCardView(
+                        record: node.record,
+                        isSelected: selectedID == node.id,
+                        isMatch: filter?.matched.contains(node.id) ?? false,
+                        isDimmed: filter.map { !$0.isVisible(node.id) } ?? false
+                    )
+                    .frame(width: nodeSize.width, height: nodeSize.height)
+                    .position(node.center)
+                    .onTapGesture { selectedID = node.id }
                 }
             }
             .frame(width: laid.size.width, height: laid.size.height, alignment: .topLeading)
@@ -67,7 +81,8 @@ struct TreeView: View {
                 path.addLine(to: CGPoint(x: start.x, y: midY))
                 path.addLine(to: CGPoint(x: end.x, y: midY))
                 path.addLine(to: end)
-                context.stroke(path, with: .color(.secondary.opacity(0.55)),
+                let visible = filter.map { $0.isVisible(edge.from) && $0.isVisible(edge.to) } ?? true
+                context.stroke(path, with: .color(.secondary.opacity(visible ? 0.55 : 0.12)),
                                style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
             }
         }
@@ -91,6 +106,14 @@ struct TreeView: View {
 struct NodeCardView: View {
     let record: LedgerRecord
     let isSelected: Bool
+    var isMatch: Bool = false
+    var isDimmed: Bool = false
+
+    private var borderColor: Color {
+        if isSelected { return .accentColor }
+        if isMatch { return .orange }
+        return .secondary.opacity(0.3)
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -122,9 +145,9 @@ struct NodeCardView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 9)
-                .strokeBorder(isSelected ? Color.accentColor : Color.secondary.opacity(0.3),
-                              lineWidth: isSelected ? 2 : 1)
+                .strokeBorder(borderColor, lineWidth: (isSelected || isMatch) ? 2 : 1)
         )
         .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+        .opacity(isDimmed ? 0.22 : 1)
     }
 }

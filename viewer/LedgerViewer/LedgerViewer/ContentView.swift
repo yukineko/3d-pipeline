@@ -8,6 +8,8 @@ struct ContentView: View {
     @State private var forest: LedgerForest?
     @State private var loadError: String?
     @State private var selectedID: String?
+    @State private var searchText = ""
+    @State private var adoptedOnly = false
 
     private let store = LedgerStore()
 
@@ -16,15 +18,43 @@ struct ContentView: View {
         return forest.records.first { $0.id == selectedID }
     }
 
+    private var filterActive: Bool { !searchText.trimmingCharacters(in: .whitespaces).isEmpty || adoptedOnly }
+
+    /// Build the active filter: records matching search/adopted, plus their
+    /// ancestors (kept for context so matches aren't orphaned in the tree).
+    private var treeFilter: TreeFilter? {
+        guard let forest, filterActive else { return nil }
+        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        func matches(_ r: LedgerRecord) -> Bool {
+            if adoptedOnly && !r.isAdopted { return false }
+            if q.isEmpty { return true }
+            return r.prompt.lowercased().contains(q)
+                || r.id.lowercased().hasPrefix(q)
+                || r.tags.contains { $0.lowercased().contains(q) }
+        }
+        let byID = Dictionary(uniqueKeysWithValues: forest.records.map { ($0.id, $0) })
+        let matched = Set(forest.records.filter(matches).map(\.id))
+        var context = Set<String>()
+        for id in matched {
+            var cur = byID[id]?.parentID
+            while let pid = cur, byID[pid] != nil, !matched.contains(pid), !context.contains(pid) {
+                context.insert(pid)
+                cur = byID[pid]?.parentID
+            }
+        }
+        return TreeFilter(matched: matched, context: context)
+    }
+
     var body: some View {
         Group {
             if let forest, !forest.records.isEmpty {
-                TreeView(forest: forest, selectedID: $selectedID)
+                TreeView(forest: forest, selectedID: $selectedID, filter: treeFilter)
             } else {
                 statusView
             }
         }
         .frame(minWidth: 720, minHeight: 480)
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search prompt, id, or tag")
         .inspector(isPresented: .constant(selectedRecord != nil)) {
             if let record = selectedRecord {
                 InspectorView(record: record)
@@ -44,6 +74,13 @@ struct ContentView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Toggle(isOn: $adoptedOnly) {
+                    Label("Adopted only", systemImage: adoptedOnly ? "checkmark.seal.fill" : "checkmark.seal")
+                }
+                .toggleStyle(.button)
+                .help("Show only adopted records (and their ancestors)")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { load() } label: { Image(systemName: "arrow.clockwise") }
