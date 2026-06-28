@@ -1,5 +1,6 @@
 {
   "name": "vrm-pipeline",
+  "description": "Marketplace for the vrm-pipeline plugin: slash commands wrapping the VRM pipeline CLIs (derive, dist, ledger, vrm-watch, edit, convert).",
   "owner": { "name": "Nakayama Hiroyuki" },
   "plugins": [
     {
