@@ -112,13 +112,150 @@ def _run_vrm_export(vrm_path: str):
     )
 
 
+def _as_mesh_object(obj):
+    """
+    Coerce a bind reference into a Blender MESH object that carries shape keys.
+
+    The VRM addon exposes a bind's mesh target through varying wrappers across
+    versions (the object directly, or via ``mesh_object`` / ``bpy_object`` /
+    ``value``). We accept the first candidate whose ``.data.shape_keys`` is
+    present, which is exactly what bake needs. Returns *None* when nothing in the
+    chain looks like a shape-key-bearing mesh.
+    """
+    if obj is None:
+        return None
+    for sub in (None, "mesh_object", "bpy_object", "value"):
+        candidate = obj if sub is None else getattr(obj, sub, None)
+        if candidate is None:
+            continue
+        data = getattr(candidate, "data", None)
+        if data is not None and getattr(data, "shape_keys", None) is not None:
+            return candidate
+    return None
+
+
+def _resolve_bind_mesh(bind):
+    """
+    Resolve the Blender MESH object that an expression/blend-shape *bind* drives.
+
+    VRM1 ``morph_target_binds`` reference the mesh via ``node``; VRM0 group
+    ``binds`` use ``mesh``. Attribute names vary by addon version, so we probe a
+    defensive set of candidates and, as a last resort, resolve a mesh *name*
+    through ``bpy.data.objects``. Returns *None* (caller skips the bind) when no
+    shape-key-bearing mesh can be found — never guesses.
+    """
+    candidates = []
+    for attr in ("node", "mesh", "mesh_object", "target"):
+        c = getattr(bind, attr, None)
+        if c is not None:
+            candidates.append(c)
+
+    for c in candidates:
+        obj = _as_mesh_object(c)
+        if obj is not None:
+            return obj
+
+    # Name-based fallback (real addon stores e.g. node.mesh_object_name). Only
+    # reachable inside Blender; in plain Python `import bpy` fails and we bail.
+    try:
+        import bpy
+    except Exception:
+        return None
+    for c in candidates:
+        name = getattr(c, "mesh_object_name", None) or getattr(c, "name", None)
+        if isinstance(name, str) and name:
+            try:
+                obj = bpy.data.objects.get(name)
+            except Exception:
+                obj = None
+            mesh = _as_mesh_object(obj)
+            if mesh is not None:
+                return mesh
+    return None
+
+
+def _bake_binds(value, binds) -> bool:
+    """
+    Drive the shape keys named by *binds* to ``value * bind.weight`` and bake the
+    resulting mix into each affected mesh's basis via
+    ``mesh.shape_key_add(from_mix=True)``.
+
+    This is the only way an expression survives VRM export: the exporter zeroes
+    every ``expression.preview`` before writing, so a preview assignment is a
+    silent no-op. Baking folds the deformation into the mesh geometry instead.
+
+    Returns *True* iff at least one mesh was actually baked, so the caller can
+    count it as ``applied`` only when a real, export-surviving change happened.
+    """
+    if binds is None:
+        return False
+
+    affected = {}  # id(mesh) -> mesh object (dedupe meshes touched by >1 bind)
+    for bind in binds:
+        mesh_obj = _resolve_bind_mesh(bind)
+        if mesh_obj is None:
+            print("[vrm_edit] INFO: expression bind has no resolvable mesh, skipping bind",
+                  file=sys.stderr)
+            continue
+
+        index = getattr(bind, "index", None)
+        if index is None:
+            print("[vrm_edit] INFO: expression bind has no shape-key index, skipping bind",
+                  file=sys.stderr)
+            continue
+
+        bind_weight = getattr(bind, "weight", 1.0)
+        try:
+            bind_weight = float(bind_weight)
+        except (TypeError, ValueError):
+            bind_weight = 1.0
+
+        data = getattr(mesh_obj, "data", None)
+        shape_keys = getattr(data, "shape_keys", None) if data is not None else None
+        key_blocks = getattr(shape_keys, "key_blocks", None) if shape_keys is not None else None
+        if key_blocks is None:
+            print("[vrm_edit] INFO: mesh has no shape keys to drive, skipping bind",
+                  file=sys.stderr)
+            continue
+
+        try:
+            key_blocks[index].value = float(value) * bind_weight
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            print(f"[vrm_edit] INFO: could not set shape key [{index}] on "
+                  f"'{getattr(mesh_obj, 'name', '?')}' ({exc}), skipping bind",
+                  file=sys.stderr)
+            continue
+
+        affected[id(mesh_obj)] = mesh_obj
+
+    baked = False
+    for mesh_obj in affected.values():
+        try:
+            mesh_obj.shape_key_add(name="_vrm_edit_baked", from_mix=True)
+            baked = True
+            print(f"[vrm_edit] INFO: baked expression mix into basis of "
+                  f"'{getattr(mesh_obj, 'name', '?')}'", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 - shape_key_add API varies by build
+            print(f"[vrm_edit] WARNING: shape_key_add(from_mix=True) failed on "
+                  f"'{getattr(mesh_obj, 'name', '?')}': {exc}", file=sys.stderr)
+    return baked
+
+
 def _apply_expressions(armature, adjustments: dict, spec_version: str) -> dict:
     """
-    Apply expression weights from adjustments['expressions'] to the VRM armature.
-    Safe-skips any expression key that doesn't exist in the model.
+    Apply expression weights from adjustments['expressions'] to the VRM armature
+    by *baking* the driven shape keys into the mesh basis.
 
-    Returns an accounting dict ``{"expressions": {"requested": N, "applied": M}}``
-    so callers can detect a silently-ineffective edit (requested > 0, applied 0).
+    The VRM exporter clears every ``expression.preview`` / ``blend_shape_group.
+    preview`` right before writing, so assigning ``preview`` does nothing in the
+    exported file. Instead we follow each expression's binds to the shape keys it
+    drives (VRM1 ``morph_target_binds`` / VRM0 group ``binds``), set their values,
+    and fold the mix into the basis with ``shape_key_add(from_mix=True)``.
+
+    Returns an accounting dict ``{"expressions": {"requested": N, "applied": M}}``.
+    *applied* counts only expressions that were genuinely baked into geometry —
+    a preview-only fallback is **not** counted, so a silently-ineffective edit is
+    still reported as applied == 0 (consistent with ``_assert_adjustments_applied``).
     """
     expressions = adjustments.get("expressions", {})
     requested = len(expressions)
@@ -160,18 +297,24 @@ def _apply_expressions(armature, adjustments: dict, spec_version: str) -> dict:
                 print(f"[vrm_edit] INFO: expression '{key}' not found in VRM1 presets, skipping",
                       file=sys.stderr)
                 continue
-            try:
-                if hasattr(expr_obj, "preview"):
-                    expr_obj.preview = float(value)
-                elif hasattr(expr_obj, "morph_target_binds"):
-                    # Set preview through weight property if available
-                    if hasattr(expr_obj, "weight"):
-                        expr_obj.weight = float(value)
-                print(f"[vrm_edit] INFO: set VRM1 expression '{key}' = {value}", file=sys.stderr)
+
+            binds = getattr(expr_obj, "morph_target_binds", None)
+            if _bake_binds(value, binds):
                 applied += 1
-            except Exception as exc:
-                print(f"[vrm_edit] WARNING: failed to set expression '{key}': {exc}",
+                print(f"[vrm_edit] INFO: baked VRM1 expression '{key}' = {value}",
                       file=sys.stderr)
+                continue
+
+            # Preview fallback: keeps the in-Blender weight visible but does NOT
+            # survive export, so it is intentionally not counted as applied.
+            if hasattr(expr_obj, "preview"):
+                try:
+                    expr_obj.preview = float(value)
+                except Exception as exc:
+                    print(f"[vrm_edit] WARNING: preview fallback for '{key}' failed: {exc}",
+                          file=sys.stderr)
+            print(f"[vrm_edit] INFO: expression '{key}' had no bakeable binds; "
+                  f"preview set as fallback (not counted as applied)", file=sys.stderr)
 
         return _account()
 
@@ -205,25 +348,35 @@ def _apply_expressions(armature, adjustments: dict, spec_version: str) -> dict:
 
     for key, value in expressions.items():
         lookup_names = vrm0_preset_map.get(key, [key])
-        found = False
+        matched_group = None
         for group in blend_shape_groups:
             group_name = getattr(group, "name", "").lower()
             group_preset = getattr(group, "preset_name", "").lower()
             if any(n in group_name or n == group_preset for n in lookup_names):
-                try:
-                    if hasattr(group, "preview"):
-                        group.preview = float(value)
-                    print(f"[vrm_edit] INFO: set VRM0 blend_shape '{group.name}' = {value}",
-                          file=sys.stderr)
-                    found = True
-                    applied += 1
-                except Exception as exc:
-                    print(f"[vrm_edit] WARNING: failed to set blend_shape '{key}': {exc}",
-                          file=sys.stderr)
+                matched_group = group
                 break
-        if not found:
+
+        if matched_group is None:
             print(f"[vrm_edit] INFO: expression '{key}' not found in VRM0 blend shapes, skipping",
                   file=sys.stderr)
+            continue
+
+        binds = getattr(matched_group, "binds", None)
+        if _bake_binds(value, binds):
+            applied += 1
+            print(f"[vrm_edit] INFO: baked VRM0 blend_shape "
+                  f"'{getattr(matched_group, 'name', key)}' = {value}", file=sys.stderr)
+            continue
+
+        # Preview fallback (not counted as applied — does not survive export).
+        if hasattr(matched_group, "preview"):
+            try:
+                matched_group.preview = float(value)
+            except Exception as exc:
+                print(f"[vrm_edit] WARNING: preview fallback for '{key}' failed: {exc}",
+                      file=sys.stderr)
+        print(f"[vrm_edit] INFO: blend_shape '{key}' had no bakeable binds; "
+              f"preview set as fallback (not counted as applied)", file=sys.stderr)
 
     return _account()
 

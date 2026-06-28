@@ -800,5 +800,266 @@ class TestSanitizeHeightScale(unittest.TestCase):
             _sanitize_height_scale(float("inf"))
 
 
+# ---------------------------------------------------------------------------
+# Expression bake: drive shape keys and fold the mix into the basis
+# ---------------------------------------------------------------------------
+
+class _FakeShapeKey:
+    """A single key_block whose .value the bake sets."""
+
+    def __init__(self):
+        self.value = 0.0
+
+
+class _FakeMesh:
+    """A MESH object exposing .data.shape_keys.key_blocks and shape_key_add()."""
+
+    def __init__(self, name, n_keys=4):
+        self.name = name
+        self.type = "MESH"
+        key_blocks = [_FakeShapeKey() for _ in range(n_keys)]
+
+        class _ShapeKeys:
+            pass
+
+        class _Data:
+            pass
+
+        sk = _ShapeKeys()
+        sk.key_blocks = key_blocks
+        data = _Data()
+        data.shape_keys = sk
+        self.data = data
+        self.shape_key_add = MagicMock()
+
+
+class _FakeBind:
+    """A morph_target_bind / blend_shape bind: mesh reference + index + weight."""
+
+    def __init__(self, mesh, index, weight=1.0, ref_attr="node"):
+        # VRM1 binds reference the mesh via `node`; VRM0 via `mesh`.
+        setattr(self, ref_attr, mesh)
+        self.index = index
+        self.weight = weight
+
+
+class _FakeExpr:
+    def __init__(self, binds):
+        self.morph_target_binds = binds
+        self.preview = 0.0
+
+
+class _FakeGroup:
+    def __init__(self, name, binds, preset_name=""):
+        self.name = name
+        self.preset_name = preset_name
+        self.binds = binds
+        self.preview = 0.0
+
+
+def _make_vrm1_armature(preset_attrs):
+    """Build a fake armature whose vrm1.expressions.preset has the given exprs."""
+    class _Preset:
+        pass
+
+    preset = _Preset()
+    for k, v in preset_attrs.items():
+        setattr(preset, k, v)
+
+    class _Exprs:
+        pass
+
+    exprs = _Exprs()
+    exprs.preset = preset
+
+    class _Vrm1:
+        pass
+
+    vrm1 = _Vrm1()
+    vrm1.expressions = exprs
+
+    class _Ext:
+        pass
+
+    ext = _Ext()
+    ext.vrm1 = vrm1
+
+    class _ArmData:
+        pass
+
+    armdata = _ArmData()
+    armdata.vrm_addon_extension = ext
+
+    class _Arm:
+        pass
+
+    arm = _Arm()
+    arm.data = armdata
+    return arm
+
+
+def _make_vrm0_armature(groups):
+    class _Master:
+        pass
+
+    master = _Master()
+    master.blend_shape_groups = groups
+
+    class _Vrm0:
+        pass
+
+    vrm0 = _Vrm0()
+    vrm0.blend_shape_master = master
+
+    class _Ext:
+        pass
+
+    ext = _Ext()
+    ext.vrm0 = vrm0
+
+    class _ArmData:
+        pass
+
+    armdata = _ArmData()
+    armdata.vrm_addon_extension = ext
+
+    class _Arm:
+        pass
+
+    arm = _Arm()
+    arm.data = armdata
+    return arm
+
+
+class TestApplyExpressionsBakeVRM1(unittest.TestCase):
+    """VRM1 expressions must bake morph_target_binds into the mesh basis.
+
+    Assigning expression.preview is a silent no-op (the exporter clears previews),
+    so the only export-surviving change is setting shape-key values and folding
+    the mix into the basis via shape_key_add(from_mix=True).
+    """
+
+    def test_morph_bind_sets_value_and_bakes(self):
+        from render.vrm_edit import _apply_expressions
+
+        mesh = _FakeMesh("Face", n_keys=4)
+        bind = _FakeBind(mesh, index=2, weight=0.5, ref_attr="node")
+        arm = _make_vrm1_armature({"happy": _FakeExpr([bind])})
+
+        result = _apply_expressions(arm, {"expressions": {"happy": 1.0}}, "1.0")
+
+        self.assertEqual(result, {"expressions": {"requested": 1, "applied": 1}})
+        # value = requested(1.0) * bind.weight(0.5)
+        self.assertEqual(mesh.data.shape_keys.key_blocks[2].value, 0.5)
+        mesh.shape_key_add.assert_called_once_with(name="_vrm_edit_baked", from_mix=True)
+
+    def test_empty_binds_not_counted_as_applied(self):
+        from render.vrm_edit import _apply_expressions
+
+        expr = _FakeExpr([])  # no binds → nothing bakeable
+        arm = _make_vrm1_armature({"happy": expr})
+
+        result = _apply_expressions(arm, {"expressions": {"happy": 1.0}}, "1.0")
+
+        self.assertEqual(result, {"expressions": {"requested": 1, "applied": 0}})
+
+    def test_missing_expression_not_counted(self):
+        from render.vrm_edit import _apply_expressions
+
+        arm = _make_vrm1_armature({})  # preset has no 'happy'
+        result = _apply_expressions(arm, {"expressions": {"happy": 1.0}}, "1.0")
+        self.assertEqual(result, {"expressions": {"requested": 1, "applied": 0}})
+
+    def test_preview_fallback_not_counted_but_set(self):
+        from render.vrm_edit import _apply_expressions
+
+        # binds is None entirely (no morph_target_binds attribute resolvable to a mesh)
+        expr = _FakeExpr(None)
+        arm = _make_vrm1_armature({"happy": expr})
+
+        result = _apply_expressions(arm, {"expressions": {"happy": 1.0}}, "1.0")
+
+        self.assertEqual(result, {"expressions": {"requested": 1, "applied": 0}})
+        # preview set as a (non-counted) fallback
+        self.assertEqual(expr.preview, 1.0)
+
+    def test_two_binds_same_mesh_bake_once(self):
+        from render.vrm_edit import _apply_expressions
+
+        mesh = _FakeMesh("Face", n_keys=4)
+        b1 = _FakeBind(mesh, index=0, weight=1.0, ref_attr="node")
+        b2 = _FakeBind(mesh, index=1, weight=0.25, ref_attr="node")
+        arm = _make_vrm1_armature({"angry": _FakeExpr([b1, b2])})
+
+        result = _apply_expressions(arm, {"expressions": {"angry": 0.8}}, "1.0")
+
+        self.assertEqual(result, {"expressions": {"requested": 1, "applied": 1}})
+        self.assertEqual(mesh.data.shape_keys.key_blocks[0].value, 0.8)
+        self.assertAlmostEqual(mesh.data.shape_keys.key_blocks[1].value, 0.2)
+        # same mesh touched by two binds → baked exactly once
+        mesh.shape_key_add.assert_called_once_with(name="_vrm_edit_baked", from_mix=True)
+
+
+class TestApplyExpressionsBakeVRM0(unittest.TestCase):
+    """VRM0 expressions must bake blend_shape_group.binds into the mesh basis."""
+
+    def test_group_bind_sets_value_and_bakes(self):
+        from render.vrm_edit import _apply_expressions
+
+        mesh = _FakeMesh("Face", n_keys=4)
+        bind = _FakeBind(mesh, index=3, weight=1.0, ref_attr="mesh")
+        # 'happy' maps to VRM0 preset 'joy'
+        group = _FakeGroup("Joy", [bind], preset_name="joy")
+        arm = _make_vrm0_armature([group])
+
+        result = _apply_expressions(arm, {"expressions": {"happy": 0.7}}, "0")
+
+        self.assertEqual(result, {"expressions": {"requested": 1, "applied": 1}})
+        self.assertAlmostEqual(mesh.data.shape_keys.key_blocks[3].value, 0.7)
+        mesh.shape_key_add.assert_called_once_with(name="_vrm_edit_baked", from_mix=True)
+
+    def test_unmatched_expression_not_counted(self):
+        from render.vrm_edit import _apply_expressions
+
+        mesh = _FakeMesh("Face")
+        group = _FakeGroup("Joy", [_FakeBind(mesh, 0, ref_attr="mesh")], preset_name="joy")
+        arm = _make_vrm0_armature([group])
+
+        result = _apply_expressions(arm, {"expressions": {"surprised": 1.0}}, "0")
+        self.assertEqual(result, {"expressions": {"requested": 1, "applied": 0}})
+        mesh.shape_key_add.assert_not_called()
+
+    def test_empty_binds_not_counted(self):
+        from render.vrm_edit import _apply_expressions
+
+        group = _FakeGroup("Joy", [], preset_name="joy")
+        arm = _make_vrm0_armature([group])
+
+        result = _apply_expressions(arm, {"expressions": {"happy": 1.0}}, "0")
+        self.assertEqual(result, {"expressions": {"requested": 1, "applied": 0}})
+
+
+class TestApplyExpressionsGuards(unittest.TestCase):
+    """Existing guards (no ext / empty request) must keep their accounting."""
+
+    def test_no_expressions_zero_account(self):
+        from render.vrm_edit import _apply_expressions
+        arm = _make_vrm1_armature({})
+        result = _apply_expressions(arm, {}, "1.0")
+        self.assertEqual(result, {"expressions": {"requested": 0, "applied": 0}})
+
+    def test_no_extension_skips(self):
+        from render.vrm_edit import _apply_expressions
+
+        class _ArmData:
+            vrm_addon_extension = None
+
+        class _Arm:
+            data = _ArmData()
+
+        result = _apply_expressions(_Arm(), {"expressions": {"happy": 1.0}}, "1.0")
+        self.assertEqual(result, {"expressions": {"requested": 1, "applied": 0}})
+
+
 if __name__ == "__main__":
     unittest.main()
