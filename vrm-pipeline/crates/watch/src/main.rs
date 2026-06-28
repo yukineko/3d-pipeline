@@ -26,14 +26,16 @@
 //! 7. 正常完了を tracing::info で出力
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::channel;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
+use wait_timeout::ChildExt;
 
 /// VRM ファイルを監視して Blender レンダー + ledger 登録を行うウォッチャー
 #[derive(Parser, Debug)]
@@ -74,6 +76,10 @@ struct Args {
     /// 台帳 INSERT 時の prompt
     #[arg(long, default_value = "")]
     prompt: String,
+
+    /// blender / ledger サブプロセスのタイムアウト秒数 (超過したら kill する)
+    #[arg(long, default_value_t = 600)]
+    timeout_secs: u64,
 }
 
 /// CLI 設定をまとめた構造体
@@ -88,6 +94,7 @@ pub struct Config {
     pub golden_dir: Option<PathBuf>,
     pub noise_floor_threshold: f32,
     pub prompt: String,
+    pub timeout_secs: u64,
 }
 
 impl Config {
@@ -105,6 +112,7 @@ impl Config {
             golden_dir: args.golden_dir,
             noise_floor_threshold: args.noise_floor_threshold,
             prompt: args.prompt,
+            timeout_secs: args.timeout_secs,
         }
     }
 }
@@ -151,6 +159,71 @@ pub fn check_eval_a(manifest: &Manifest, threshold: f32) -> bool {
     }
 }
 
+/// 既に spawn 済みの子プロセスを kill-enforced timeout 付きで待機する。
+///
+/// `std::process::Command::output()` はタイムアウトを持たず、ハングした子プロセスを
+/// 無限に待ってしまう。代わりに stdout/stderr を別スレッドで排出（パイプバッファの
+/// デッドロック回避）しつつ `wait_timeout` で待ち、超過したら kill して reap する。
+///
+/// - `Ok(Some(status))` → 排出スレッドを join して `Output` を組み立てて返す
+/// - `Ok(None)`（タイムアウト）→ kill + wait（reap）して `{label} がタイムアウトしました ({n}s)` で bail
+/// - `Err(e)` → kill + wait してエラーを wrap して bail
+fn run_with_timeout(
+    mut child: std::process::Child,
+    timeout_secs: u64,
+    label: &str,
+) -> Result<std::process::Output> {
+    use std::io::Read;
+
+    // パイプを take して各々を専用スレッドで排出する。
+    // wait_timeout の前に排出しないと、子がパイプバッファを埋めた時に
+    // 子（write 側）とこちら（wait 側）でデッドロックし得る。
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(s) = stdout_pipe.as_mut() {
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(s) = stderr_pipe.as_mut() {
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    match child.wait_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(Some(status)) => {
+            let stdout = stdout_handle.join().unwrap_or_default();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        }
+        Ok(None) => {
+            // タイムアウト: kill して reap し、排出スレッドを回収する。
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            anyhow::bail!("{} がタイムアウトしました ({}s)", label, timeout_secs);
+        }
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            anyhow::bail!("{} の待機に失敗しました: {}", label, e);
+        }
+    }
+}
+
 /// VRM ファイルを Blender でレンダーして Manifest を返す
 pub fn run_blender(vrm: &Path, output: &Path, config: &Config) -> Result<Manifest> {
     let mut cmd = Command::new(&config.blender);
@@ -173,9 +246,13 @@ pub fn run_blender(vrm: &Path, output: &Path, config: &Config) -> Result<Manifes
         "blender 実行開始"
     );
 
-    let result = cmd
-        .output()
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
         .with_context(|| format!("blender の起動に失敗しました: {}", config.blender))?;
+
+    let result = run_with_timeout(child, config.timeout_secs, "blender")?;
 
     let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
@@ -207,9 +284,13 @@ pub fn run_ledger_insert(output_dir: &Path, config: &Config) -> Result<()> {
         "ledger insert 実行"
     );
 
-    let result = cmd
-        .output()
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
         .with_context(|| format!("ledger の起動に失敗しました: {}", config.ledger_bin))?;
+
+    let result = run_with_timeout(child, config.timeout_secs, "ledger insert")?;
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
@@ -427,6 +508,7 @@ mod tests {
             golden_dir: None,
             noise_floor_threshold: 10.0,
             prompt: "".to_string(),
+            timeout_secs: 600,
         };
 
         // .txt ファイルを渡すと blender を起動せず Ok(()) を返すはず
@@ -452,9 +534,55 @@ mod tests {
             golden_dir: None,
             noise_floor_threshold: 10.0,
             prompt: "".to_string(),
+            timeout_secs: 600,
         };
 
         let result = handle_vrm_event(&vrm_path, &config);
         assert!(result.is_err(), "存在しない blender はエラーを返すべき");
+    }
+
+    // run_with_timeout: タイムアウトより長く眠る子プロセスは kill されて Err を返すこと
+    #[test]
+    fn test_run_with_timeout_kills_on_timeout() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 5")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = cmd.spawn().expect("sh の起動に失敗しました");
+
+        let start = std::time::Instant::now();
+        let result = run_with_timeout(child, 1, "blender");
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "タイムアウトした子プロセスは Err を返すべき");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("タイムアウト"),
+            "エラーメッセージにタイムアウトが含まれるべき: {}",
+            msg
+        );
+        // 5s 待たずに ~1s で kill されていること（無限待ちでないことの確認）
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "タイムアウトで kill されず長く待ってしまっている: {:?}",
+            elapsed
+        );
+    }
+
+    // run_with_timeout: タイムアウト内に正常終了する子プロセスは Ok を返すこと
+    #[test]
+    fn test_run_with_timeout_ok_within_deadline() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("printf out; printf err 1>&2; exit 0")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = cmd.spawn().expect("sh の起動に失敗しました");
+
+        let result = run_with_timeout(child, 30, "blender").expect("正常終了は Ok を返すべき");
+        assert!(result.status.success(), "exit 0 は success のはず");
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "out");
+        assert_eq!(String::from_utf8_lossy(&result.stderr), "err");
     }
 }
