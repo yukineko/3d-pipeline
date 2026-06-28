@@ -1,2 +1,10 @@
 **/__pycache__
 .claude/
+
+# Xcode / SwiftUI viewer (viewer/LedgerViewer) build artifacts
+DerivedData/
+build/
+*.xcuserstate
+**/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+.DS_Store
