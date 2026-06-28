@@ -68,6 +68,9 @@ enum Commands {
         root: Option<String>,
     },
 
+    /// Export the whole forest as JSON (records with parent_id for lineage)
+    Export,
+
     /// Mark a record as adopted
     Adopt {
         /// Record ID
@@ -184,6 +187,11 @@ fn main() -> Result<()> {
         Commands::Tree { root } => {
             let records = db::all_records(&db_path)?;
             print_tree(&records, root.as_deref());
+        }
+
+        Commands::Export => {
+            let records = db::all_records(&db_path)?;
+            println!("{}", export_json(&records)?);
         }
 
         Commands::Adopt { id } => {
@@ -307,6 +315,13 @@ fn short_prompt(prompt: &str) -> String {
     }
 }
 
+/// Serialize the whole forest as pretty JSON. Each record carries its
+/// `parent_id`, so a consumer (e.g. the SwiftUI viewer) can rebuild the
+/// derivation forest without depending on the SQLite schema/migrations.
+fn export_json(records: &[schema::Record]) -> Result<String> {
+    Ok(serde_json::to_string_pretty(records)?)
+}
+
 fn print_tree(records: &[schema::Record], root: Option<&str>) {
     use std::collections::{HashMap, HashSet};
 
@@ -371,6 +386,46 @@ fn walk(
         for (i, c) in kids.iter().enumerate() {
             walk(c, &child_prefix, false, i == kids.len() - 1, children);
         }
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::export_json;
+    use crate::schema::Record;
+
+    fn rec(id: &str, parent: Option<&str>) -> Record {
+        Record {
+            id: id.into(),
+            timestamp: "2026-01-01".into(),
+            prompt: "p".into(),
+            generation_params: "{}".into(),
+            r0_ref: String::new(),
+            r1_ref: None,
+            outcome: "{}".into(),
+            asset_ref: "{}".into(),
+            derived: "{}".into(),
+            parent_id: parent.map(|s| s.into()),
+            image_ref: None,
+        }
+    }
+
+    #[test]
+    fn export_is_valid_json_preserving_lineage() {
+        let records = vec![rec("a", None), rec("b", Some("a"))];
+        let json = export_json(&records).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = parsed.as_array().expect("export is a JSON array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], "a");
+        assert_eq!(arr[0]["parent_id"], serde_json::Value::Null);
+        assert_eq!(arr[1]["parent_id"], "a");
+    }
+
+    #[test]
+    fn export_empty_forest_is_empty_array() {
+        let json = export_json(&[]).unwrap();
+        assert_eq!(json.trim(), "[]");
     }
 }
 
