@@ -130,6 +130,16 @@ enum Commands {
         edit_dist_embed: Option<f64>,
     },
 
+    /// Set the r0_ref (canonical render dir) for a record
+    SetR0Ref {
+        /// Record ID
+        #[arg(long)]
+        id: String,
+        /// Path to R0 render directory
+        #[arg(long)]
+        path: String,
+    },
+
     /// Set the r1_ref path for a record
     SetR1Ref {
         /// Record ID
@@ -258,6 +268,11 @@ fn main() -> Result<()> {
                 db::update_outcome_embed(&db_path, &id, embed)?;
                 println!("Updated outcome for {id}: edit_dist_embed={embed}");
             }
+        }
+
+        Commands::SetR0Ref { id, path } => {
+            db::set_r0_ref(&db_path, &id, &path)?;
+            println!("Set r0_ref for {id}: {path}");
         }
 
         Commands::SetR1Ref { id, path } => {

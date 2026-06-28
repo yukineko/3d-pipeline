@@ -214,6 +214,21 @@ pub fn set_r1_ref(db_path: &std::path::Path, id: &str, r1_ref: &str) -> Result<(
     Ok(())
 }
 
+/// Set the r0_ref (canonical render dir) for an existing record. Lets a manual
+/// capture be attached to a record created without renders (e.g. a VRoid import).
+pub fn set_r0_ref(db_path: &std::path::Path, id: &str, r0_ref: &str) -> Result<()> {
+    let conn = open(db_path)?;
+    let affected = conn.execute(
+        "UPDATE records SET r0_ref = ?1 WHERE id = ?2",
+        params![r0_ref, id],
+    )
+    .context("failed to set r0_ref")?;
+    if affected == 0 {
+        anyhow::bail!("record not found: {id}");
+    }
+    Ok(())
+}
+
 pub fn get_embedding(db_path: &std::path::Path, id: &str) -> Result<Option<Vec<f64>>> {
     let conn = open(db_path)?;
     let derived: String = conn
