@@ -148,8 +148,14 @@ def setup_unlit_materials():
         else:
             emit_node.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
         links.new(emit_node.outputs["Emission"], out_node.inputs["Surface"])
-        mat.blend_method = "BLEND"
-        mat.shadow_method = "NONE"
+        # blend_method / shadow_method are legacy EEVEE properties removed in
+        # Blender 4.3+ (EEVEE-Next). Guard so material setup doesn't raise on
+        # new Blender (the unlit emission + Standard view transform already give
+        # flat, shadowless output) while keeping the hint on older Blender.
+        if hasattr(mat, "blend_method"):
+            mat.blend_method = "BLEND"
+        if hasattr(mat, "shadow_method"):
+            mat.shadow_method = "NONE"
         mat.use_backface_culling = False
 
 

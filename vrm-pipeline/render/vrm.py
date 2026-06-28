@@ -105,8 +105,40 @@ def _disable_vrm_spring_bones():
 # ---------------------------------------------------------------------------
 
 def get_vrm_addon_version():
-    candidate_modules = ["io_scene_vrm", "VRM_Addon_for_Blender", "vrm_addon_for_blender"]
-    for mod_name in candidate_modules:
+    """Return the installed VRM add-on version string, or None.
+
+    Handles both the legacy add-on (module ``io_scene_vrm``, version in
+    ``bl_info``) and the Blender 4.2+/5.x *extension* install (module
+    ``bl_ext.user_default.vrm``, version in ``blender_manifest.toml``).
+    ``addon_utils.module_bl_info()`` normalizes both into a dict with
+    ``version``, so the extension's manifest version is found too — the plain
+    ``bl_info`` read used to miss it and report null despite a working install.
+    """
+    # Preferred: scan enabled add-ons/extensions and read the normalized info.
+    try:
+        import bpy
+        import addon_utils
+        for addon in bpy.context.preferences.addons:
+            module = addon.module
+            if "vrm" not in module.lower():
+                continue
+            mod = sys.modules.get(module)
+            if mod is None:
+                try:
+                    mod = importlib.import_module(module)
+                except Exception:  # audit-ignore: best-effort version probe; skip unimportable addon
+                    continue
+            try:
+                info = addon_utils.module_bl_info(mod)
+            except Exception:  # audit-ignore: fall back to raw bl_info if normalization fails
+                info = getattr(mod, "bl_info", None)
+            ver = info.get("version") if isinstance(info, dict) else None
+            if ver:
+                return ".".join(str(v) for v in ver)
+    except Exception:  # audit-ignore: version detection is best-effort and must never break a render
+        pass
+    # Legacy fallback: direct import (older Blender / non-extension installs).
+    for mod_name in ("io_scene_vrm", "VRM_Addon_for_Blender", "vrm_addon_for_blender"):
         try:
             mod = importlib.import_module(mod_name)
             ver = getattr(mod, "bl_info", {}).get("version", None)
@@ -114,17 +146,6 @@ def get_vrm_addon_version():
                 return ".".join(str(v) for v in ver)
         except ImportError:
             continue
-    try:
-        import bpy
-        for addon in bpy.context.preferences.addons:
-            if "vrm" in addon.module.lower():
-                mod = sys.modules.get(addon.module)
-                if mod:
-                    ver = getattr(mod, "bl_info", {}).get("version", None)
-                    if ver:
-                        return ".".join(str(v) for v in ver)
-    except Exception:
-        pass
     return None
 
 
