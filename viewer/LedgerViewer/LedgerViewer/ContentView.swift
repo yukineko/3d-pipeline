@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var selectedID: String?
     @State private var searchText = ""
     @State private var adoptedOnly = false
+    @StateObject private var watcher = LedgerWatcher(path: LedgerStore.defaultPath)
 
     private let store = LedgerStore()
 
@@ -88,6 +89,7 @@ struct ContentView: View {
             }
         }
         .onAppear(perform: load)
+        .onChange(of: watcher.changeToken) { _, _ in load() }
     }
 
     @ViewBuilder private var statusView: some View {
