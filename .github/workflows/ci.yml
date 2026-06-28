@@ -46,13 +46,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: vrm-pipeline
-      # The `dist` crate is currently an unimplemented stub (src/lib.rs is just
-      # `// stub`) but still ships an integration test asserting a full pHash
-      # API, so `cargo test --workspace` fails to COMPILE. Exclude it until the
-      # crate is implemented (tracked separately); ledger + watch are real and
-      # are the meaningful coverage here.
-      - name: cargo test (workspace, excluding stub `dist` crate)
-        run: cargo test --workspace --exclude dist
+      - name: cargo test (workspace)
+        run: cargo test --workspace
 
   lint:
     name: Lint (advisory)
@@ -82,5 +77,5 @@ jobs:
         run: cargo fmt --all --check
         continue-on-error: true
       - name: cargo clippy
-        run: cargo clippy --workspace --exclude dist --all-targets
+        run: cargo clippy --workspace --all-targets
         continue-on-error: true
