@@ -794,11 +794,17 @@ def run_blender(blender_path: str, script_path: str, output_glb: str, sandbox: b
     otherwise the plain command is run (best-effort, never fails for that).
     """
     cmd = build_blender_cmd(blender_path, script_path, output_glb, sandbox=sandbox)
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-    )
+    timeout = int(os.environ.get("VRM_SUBPROCESS_TIMEOUT", "600"))
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[generate] WARN run_blender timed out after {timeout}s", file=sys.stderr)
+        return 124, "", f"timeout after {timeout}s"
     return result.returncode, result.stdout, result.stderr
 
 

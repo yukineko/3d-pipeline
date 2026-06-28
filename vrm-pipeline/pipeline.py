@@ -48,7 +48,12 @@ STATE_FILE = ".pipeline_state.json"
 
 def _run(cmd, label=""):
     """Run subprocess, return (stdout, stderr, returncode)."""
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    timeout = int(os.environ.get("VRM_SUBPROCESS_TIMEOUT", "600"))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"[pipeline] WARN {label} timed out after {timeout}s", file=sys.stderr)
+        return "", f"timeout after {timeout}s", 124
     if result.returncode != 0:
         print(f"[pipeline] WARN {label} exit={result.returncode}", file=sys.stderr)
         if result.stderr:

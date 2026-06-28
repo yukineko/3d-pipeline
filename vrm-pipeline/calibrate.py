@@ -13,6 +13,7 @@ Usage:
 import argparse
 import itertools
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -51,9 +52,10 @@ FACE_NAMES = [
 
 def _run(cmd, label=""):
     """Run subprocess, return (stdout, stderr, returncode)."""
+    timeout = int(os.environ.get("VRM_SUBPROCESS_TIMEOUT", "600"))
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-    except (FileNotFoundError, OSError) as exc:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
         print(f"[calibrate] WARN {label} could not launch: {exc}", file=sys.stderr)
         return "", str(exc), 1
     if result.returncode != 0:

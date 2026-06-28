@@ -61,7 +61,13 @@ DEFAULT_DB_PATH = Path.home() / ".vrm-pipeline" / "ledger.db"
 def get_parent_record(db_path: Path, parent_id: str) -> dict:
     """Fetch the parent record via the `ledger get` CLI."""
     cmd = ["ledger", "--db", str(db_path), "get", "--id", parent_id]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    timeout = int(os.environ.get("VRM_SUBPROCESS_TIMEOUT", "600"))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"ledger get for id '{parent_id}' timed out after {timeout}s"
+        )
     if result.returncode != 0:
         raise RuntimeError(
             f"ledger get failed for id '{parent_id}':\n{result.stderr.strip()}"

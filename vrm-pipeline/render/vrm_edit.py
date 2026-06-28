@@ -870,7 +870,13 @@ def edit_vrm(
             "--report-file", report_file,
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        timeout = int(os.environ.get("VRM_SUBPROCESS_TIMEOUT", "600"))
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"Blender timed out after {timeout}s during VRM edit."
+            )
 
         if result.returncode != 0:
             stderr_tail = result.stderr[-2000:] if result.stderr else ""

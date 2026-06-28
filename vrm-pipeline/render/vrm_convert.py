@@ -235,7 +235,13 @@ def glb_to_vrm(
         "--out", str(vrm_path),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    timeout = int(os.environ.get("VRM_SUBPROCESS_TIMEOUT", "600"))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Blender timed out after {timeout}s during GLB→VRM conversion."
+        )
 
     if result.returncode != 0:
         # Surface the bpy script's error output so the caller can diagnose
