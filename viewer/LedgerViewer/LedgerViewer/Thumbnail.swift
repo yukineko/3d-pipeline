@@ -3,15 +3,20 @@ import SwiftUI
 
 /// Loads a representative thumbnail from a record's render directory (r0_ref).
 ///
-/// The Rust/Blender pipeline renders canonical face/body views as WebP
-/// (render/vrm.py: face_front, body_front, face_L/R/34, body_side/back).
-/// NSImage decodes WebP natively via ImageIO on macOS 11+. We prefer a
-/// front portrait, then a body front, then any image in the directory.
+/// The Rust/Blender pipeline renders canonical views as WebP. VRM assets use
+/// face/body views (render/vrm.py: face_front, body_front, face_L/R/34,
+/// body_side/back); non-VRM object assets use object views (render/object.py:
+/// obj_front/side/top/persp, context_front/persp). NSImage decodes WebP
+/// natively via ImageIO on macOS 11+. We prefer a front portrait / object
+/// front, then a hero/perspective shot, then any image in the directory.
 enum ThumbnailLoader {
     static let cache = NSCache<NSString, NSImage>()
 
     private static let preferredFaces = [
+        // VRM views (preferred first so VRM thumbnails stay unchanged)
         "face_front", "body_front", "face_34", "face_L", "face_R", "body_side", "body_back",
+        // Object views (render/object.py) — front then perspective hero as representative
+        "obj_front", "obj_persp", "obj_side", "obj_top", "context_front", "context_persp",
     ]
     private static let extensions = ["webp", "png", "jpg", "jpeg"]
 
