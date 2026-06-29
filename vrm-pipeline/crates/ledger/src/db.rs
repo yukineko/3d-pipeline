@@ -3,7 +3,9 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use uuid::Uuid;
 
-use crate::schema::{CREATE_TABLE_SQL, MIGRATE_V2_SQL, MIGRATE_V3_SQL, MIGRATE_V4_SQL, Record};
+use crate::schema::{
+    CREATE_TABLE_SQL, MIGRATE_V2_SQL, MIGRATE_V3_SQL, MIGRATE_V4_SQL, MIGRATE_V5_SQL, Record,
+};
 
 pub fn open(db_path: &std::path::Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
@@ -23,6 +25,7 @@ pub fn init(db_path: &std::path::Path) -> Result<()> {
     let _ = conn.execute_batch(MIGRATE_V2_SQL);
     let _ = conn.execute_batch(MIGRATE_V3_SQL);
     let _ = conn.execute_batch(MIGRATE_V4_SQL);
+    let _ = conn.execute_batch(MIGRATE_V5_SQL);
     Ok(())
 }
 
@@ -39,12 +42,105 @@ pub fn insert(
     let id = Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO records (id, timestamp, prompt, generation_params, r0_ref, asset_ref, parent_id, image_ref) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO records (id, timestamp, prompt, generation_params, r0_ref, asset_ref, parent_id, image_ref, status) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'done')",
         params![id, timestamp, prompt, generation_params, r0_ref, asset_ref, parent_id, image_ref],
     )
     .context("failed to insert record")?;
     Ok(id)
+}
+
+/// Insert a placeholder record for a queued generation. The record starts with
+/// status='reserved' and an empty r0_ref; a later `fulfill` attaches the render
+/// output and flips the status to 'done'. Returns the new record id.
+pub fn reserve(
+    db_path: &std::path::Path,
+    prompt: &str,
+    generation_params: &str,
+    parent_id: Option<&str>,
+    image_ref: Option<&str>,
+) -> Result<String> {
+    let conn = open(db_path)?;
+    let id = Uuid::new_v4().to_string();
+    let timestamp = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO records (id, timestamp, prompt, generation_params, r0_ref, parent_id, image_ref, status) \
+         VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, 'reserved')",
+        params![id, timestamp, prompt, generation_params, parent_id, image_ref],
+    )
+    .context("failed to reserve record")?;
+    Ok(id)
+}
+
+/// Records still awaiting generation: status 'reserved' or 'generating',
+/// oldest first (FIFO queue order).
+pub fn pending_records(db_path: &std::path::Path) -> Result<Vec<Record>> {
+    let conn = open(db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id, image_ref, status \
+             FROM records WHERE status IN ('reserved', 'generating') ORDER BY timestamp ASC",
+        )
+        .context("failed to prepare statement")?;
+    let rows = stmt
+        .query_map([], row_to_record)
+        .context("failed to query pending records")?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.context("failed to read row")?);
+    }
+    Ok(records)
+}
+
+/// Set the lifecycle status for an existing record.
+pub fn set_status(db_path: &std::path::Path, id: &str, status: &str) -> Result<()> {
+    let conn = open(db_path)?;
+    let affected = conn
+        .execute(
+            "UPDATE records SET status = ?1 WHERE id = ?2",
+            params![status, id],
+        )
+        .context("failed to set status")?;
+    if affected == 0 {
+        anyhow::bail!("record not found: {id}");
+    }
+    Ok(())
+}
+
+/// Attach render output to a reserved record and mark it done. Optionally also
+/// updates asset_ref and/or generation_params when supplied.
+pub fn fulfill(
+    db_path: &std::path::Path,
+    id: &str,
+    r0_ref: &str,
+    asset_ref: Option<&str>,
+    generation_params: Option<&str>,
+) -> Result<()> {
+    let conn = open(db_path)?;
+    let affected = conn
+        .execute(
+            "UPDATE records SET r0_ref = ?1, status = 'done' WHERE id = ?2",
+            params![r0_ref, id],
+        )
+        .context("failed to fulfill record")?;
+    if affected == 0 {
+        anyhow::bail!("record not found: {id}");
+    }
+    if let Some(asset_ref) = asset_ref {
+        conn.execute(
+            "UPDATE records SET asset_ref = ?1 WHERE id = ?2",
+            params![asset_ref, id],
+        )
+        .context("failed to update asset_ref")?;
+    }
+    if let Some(generation_params) = generation_params {
+        conn.execute(
+            "UPDATE records SET generation_params = ?1 WHERE id = ?2",
+            params![generation_params, id],
+        )
+        .context("failed to update generation_params")?;
+    }
+    Ok(())
 }
 
 /// Fetch a single record by id.
@@ -52,7 +148,7 @@ pub fn get_record(db_path: &std::path::Path, id: &str) -> Result<Record> {
     let conn = open(db_path)?;
     let record = conn
         .query_row(
-            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id, image_ref \
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id, image_ref, status \
              FROM records WHERE id = ?1",
             params![id],
             row_to_record,
@@ -66,7 +162,7 @@ pub fn all_records(db_path: &std::path::Path) -> Result<Vec<Record>> {
     let conn = open(db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id, image_ref \
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id, image_ref, status \
              FROM records ORDER BY timestamp ASC",
         )
         .context("failed to prepare statement")?;
@@ -93,6 +189,7 @@ fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<Record> {
         derived: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "{}".to_string()),
         parent_id: row.get(9)?,
         image_ref: row.get(10)?,
+        status: row.get::<_, Option<String>>(11)?.unwrap_or_else(|| "done".to_string()),
     })
 }
 
@@ -124,7 +221,7 @@ pub fn list_records(db_path: &std::path::Path, limit: u32) -> Result<Vec<Record>
     let conn = open(db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id, image_ref \
+            "SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, outcome, asset_ref, derived, parent_id, image_ref, status \
              FROM records ORDER BY timestamp DESC LIMIT ?1",
         )
         .context("failed to prepare statement")?;
@@ -509,5 +606,162 @@ mod tests {
         assert_eq!(s.adopted, 0);
         assert!((s.adoption_rate - 0.0).abs() < f64::EPSILON);
         assert!(s.avg_edit_dist.is_none());
+    }
+
+    #[test]
+    fn test_insert_defaults_status_done() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let id = insert(&db_path, "p", "/tmp/r0", "{}", "{}", None, None).unwrap();
+        let r = get_record(&db_path, &id).unwrap();
+        assert_eq!(r.status, "done");
+    }
+
+    #[test]
+    fn test_reserve_creates_reserved_row() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let id = reserve(&db_path, "queued prompt", "{}", None, None).unwrap();
+        assert!(!id.is_empty());
+
+        let r = get_record(&db_path, &id).unwrap();
+        assert_eq!(r.status, "reserved");
+        assert_eq!(r.prompt, "queued prompt");
+        assert_eq!(r.r0_ref, "");
+    }
+
+    #[test]
+    fn test_reserve_with_parent_and_image() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let root = reserve(&db_path, "root", "{}", None, None).unwrap();
+        let child = reserve(
+            &db_path,
+            "child",
+            "{\"k\":1}",
+            Some(&root),
+            Some("/tmp/in.png"),
+        )
+        .unwrap();
+
+        let r = get_record(&db_path, &child).unwrap();
+        assert_eq!(r.parent_id.as_deref(), Some(root.as_str()));
+        assert_eq!(r.image_ref.as_deref(), Some("/tmp/in.png"));
+        assert_eq!(r.generation_params, "{\"k\":1}");
+        assert_eq!(r.status, "reserved");
+    }
+
+    #[test]
+    fn test_pending_lists_only_reserved_and_generating() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        // a completed insert should NOT appear
+        let done = insert(&db_path, "done one", "/tmp/r0", "{}", "{}", None, None).unwrap();
+        let res = reserve(&db_path, "reserved one", "{}", None, None).unwrap();
+        let gen = reserve(&db_path, "generating one", "{}", None, None).unwrap();
+        set_status(&db_path, &gen, "generating").unwrap();
+
+        let pending = pending_records(&db_path).unwrap();
+        let ids: Vec<&str> = pending.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&res.as_str()));
+        assert!(ids.contains(&gen.as_str()));
+        assert!(!ids.contains(&done.as_str()));
+        assert_eq!(pending.len(), 2);
+    }
+
+    #[test]
+    fn test_set_status_transitions() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let id = reserve(&db_path, "p", "{}", None, None).unwrap();
+        set_status(&db_path, &id, "generating").unwrap();
+        assert_eq!(get_record(&db_path, &id).unwrap().status, "generating");
+        set_status(&db_path, &id, "done").unwrap();
+        assert_eq!(get_record(&db_path, &id).unwrap().status, "done");
+    }
+
+    #[test]
+    fn test_set_status_unknown_id_errors() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        assert!(set_status(&db_path, "no-such-id", "done").is_err());
+    }
+
+    #[test]
+    fn test_fulfill_sets_r0_ref_and_done() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let id = reserve(&db_path, "p", "{}", None, None).unwrap();
+        fulfill(
+            &db_path,
+            &id,
+            "/tmp/r0",
+            Some("{\"glb\":\"a.glb\"}"),
+            Some("{\"seed\":7}"),
+        )
+        .unwrap();
+
+        let r = get_record(&db_path, &id).unwrap();
+        assert_eq!(r.status, "done");
+        assert_eq!(r.r0_ref, "/tmp/r0");
+        assert_eq!(r.asset_ref, "{\"glb\":\"a.glb\"}");
+        assert_eq!(r.generation_params, "{\"seed\":7}");
+    }
+
+    #[test]
+    fn test_fulfill_without_optionals_keeps_existing() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        let id = reserve(&db_path, "p", "{\"orig\":1}", None, None).unwrap();
+        fulfill(&db_path, &id, "/tmp/r0", None, None).unwrap();
+
+        let r = get_record(&db_path, &id).unwrap();
+        assert_eq!(r.status, "done");
+        assert_eq!(r.r0_ref, "/tmp/r0");
+        assert_eq!(r.generation_params, "{\"orig\":1}");
+    }
+
+    #[test]
+    fn test_fulfill_unknown_id_errors() {
+        let (_dir, db_path) = temp_db();
+        init(&db_path).unwrap();
+        assert!(fulfill(&db_path, "no-such-id", "/tmp/r0", None, None).is_err());
+    }
+
+    #[test]
+    fn test_v5_migration_adds_column_and_defaults_done() {
+        // Simulate a legacy DB created before v5 (no status column), insert a row,
+        // then run init() again so the v5 migration applies. The legacy row must
+        // read back with status='done'.
+        let (_dir, db_path) = temp_db();
+        {
+            let conn = open(&db_path).unwrap();
+            // pre-v5 schema: table without status column
+            conn.execute_batch(
+                "CREATE TABLE records (
+                    id TEXT PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    prompt TEXT NOT NULL DEFAULT '',
+                    generation_params TEXT NOT NULL DEFAULT '{}',
+                    r0_ref TEXT NOT NULL DEFAULT '',
+                    r1_ref TEXT,
+                    outcome TEXT NOT NULL DEFAULT '{}',
+                    asset_ref TEXT NOT NULL DEFAULT '{}',
+                    derived TEXT NOT NULL DEFAULT '{}',
+                    parent_id TEXT,
+                    image_ref TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO records (id, timestamp, prompt) VALUES ('legacy', '2026-01-01', 'old row')",
+                [],
+            )
+            .unwrap();
+        }
+        // CREATE TABLE IF NOT EXISTS is a no-op; the v5 ALTER adds the column.
+        init(&db_path).unwrap();
+        let r = get_record(&db_path, "legacy").unwrap();
+        assert_eq!(r.status, "done");
     }
 }

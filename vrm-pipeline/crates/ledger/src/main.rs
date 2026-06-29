@@ -54,6 +54,58 @@ enum Commands {
         image_ref: Option<String>,
     },
 
+    /// Reserve a placeholder record for a queued generation (status='reserved')
+    Reserve {
+        /// Prompt text
+        #[arg(long)]
+        prompt: String,
+
+        /// id of the record this one is derived from (lineage parent)
+        #[arg(long = "parent-id")]
+        parent_id: Option<String>,
+
+        /// path to the input image used to generate this record
+        #[arg(long = "image-ref")]
+        image_ref: Option<String>,
+
+        /// Generation parameters as JSON
+        #[arg(long = "generation-params", default_value = "{}")]
+        generation_params: String,
+    },
+
+    /// List records awaiting generation (status reserved/generating)
+    Pending {
+        /// Emit a JSON array instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Set the lifecycle status of a record
+    SetStatus {
+        /// Record ID
+        #[arg(long)]
+        id: String,
+        /// New status value (e.g. reserved | generating | done)
+        #[arg(long)]
+        status: String,
+    },
+
+    /// Attach render output to a reserved record and mark it done
+    Fulfill {
+        /// Record ID
+        #[arg(long)]
+        id: String,
+        /// r0 render output directory path
+        #[arg(long = "r0-dir")]
+        r0_dir: String,
+        /// Asset reference as JSON
+        #[arg(long = "asset-ref")]
+        asset_ref: Option<String>,
+        /// Generation parameters as JSON
+        #[arg(long = "generation-params")]
+        generation_params: Option<String>,
+    },
+
     /// Print a single record as JSON
     Get {
         /// Record ID
@@ -187,6 +239,66 @@ fn main() -> Result<()> {
                 image_ref.as_deref(),
             )?;
             println!("{id}");
+        }
+
+        Commands::Reserve {
+            prompt,
+            parent_id,
+            image_ref,
+            generation_params,
+        } => {
+            let id = db::reserve(
+                &db_path,
+                &prompt,
+                &generation_params,
+                parent_id.as_deref(),
+                image_ref.as_deref(),
+            )?;
+            // stdout = bare UUID so a caller can capture it.
+            println!("{id}");
+        }
+
+        Commands::Pending { json } => {
+            let records = db::pending_records(&db_path)?;
+            if json {
+                println!("{}", pending_json(&records)?);
+            } else if records.is_empty() {
+                println!("No pending records.");
+            } else {
+                println!("{:<38} {:<12} {:<25} {}", "ID", "STATUS", "TIMESTAMP", "PROMPT");
+                println!("{}", "-".repeat(110));
+                for r in &records {
+                    println!(
+                        "{:<38} {:<12} {:<25} {}",
+                        r.id,
+                        r.status,
+                        r.timestamp,
+                        short_prompt(&r.prompt)
+                    );
+                }
+                println!("\n{} pending record(s).", records.len());
+            }
+        }
+
+        Commands::SetStatus { id, status } => {
+            db::set_status(&db_path, &id, &status)?;
+            println!("Set status for {id}: {status}");
+        }
+
+        Commands::Fulfill {
+            id,
+            r0_dir,
+            asset_ref,
+            generation_params,
+        } => {
+            db::fulfill(
+                &db_path,
+                &id,
+                &r0_dir,
+                asset_ref.as_deref(),
+                generation_params.as_deref(),
+            )?;
+            println!("Fulfilled {id}: r0_ref={r0_dir} status=done");
         }
 
         Commands::Get { id } => {
@@ -337,6 +449,27 @@ fn export_json(records: &[schema::Record]) -> Result<String> {
     Ok(serde_json::to_string_pretty(records)?)
 }
 
+/// Serialize the pending queue as a JSON array of compact objects. A caller
+/// (e.g. the SwiftUI viewer) consumes this to drive generation without coupling
+/// to the SQLite schema. Field set is fixed by the CLI contract.
+fn pending_json(records: &[schema::Record]) -> Result<String> {
+    let items: Vec<serde_json::Value> = records
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "prompt": r.prompt,
+                "parent_id": r.parent_id,
+                "image_ref": r.image_ref,
+                "generation_params": r.generation_params,
+                "timestamp": r.timestamp,
+                "status": r.status,
+            })
+        })
+        .collect();
+    Ok(serde_json::to_string_pretty(&items)?)
+}
+
 fn print_tree(records: &[schema::Record], root: Option<&str>) {
     use std::collections::{HashMap, HashSet};
 
@@ -422,6 +555,7 @@ mod export_tests {
             derived: "{}".into(),
             parent_id: parent.map(|s| s.into()),
             image_ref: None,
+            status: "done".into(),
         }
     }
 
@@ -440,6 +574,50 @@ mod export_tests {
     #[test]
     fn export_empty_forest_is_empty_array() {
         let json = export_json(&[]).unwrap();
+        assert_eq!(json.trim(), "[]");
+    }
+}
+
+#[cfg(test)]
+mod pending_tests {
+    use super::pending_json;
+    use crate::schema::Record;
+
+    fn reserved(id: &str) -> Record {
+        Record {
+            id: id.into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            prompt: "queued".into(),
+            generation_params: "{}".into(),
+            r0_ref: String::new(),
+            r1_ref: None,
+            outcome: "{}".into(),
+            asset_ref: "{}".into(),
+            derived: "{}".into(),
+            parent_id: None,
+            image_ref: Some("/tmp/in.png".into()),
+            status: "reserved".into(),
+        }
+    }
+
+    #[test]
+    fn pending_json_emits_expected_fields() {
+        let json = pending_json(&[reserved("a")]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = parsed.as_array().expect("pending is a JSON array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "a");
+        assert_eq!(arr[0]["status"], "reserved");
+        assert_eq!(arr[0]["prompt"], "queued");
+        assert_eq!(arr[0]["image_ref"], "/tmp/in.png");
+        assert_eq!(arr[0]["parent_id"], serde_json::Value::Null);
+        assert_eq!(arr[0]["generation_params"], "{}");
+        assert_eq!(arr[0]["timestamp"], "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn pending_json_empty_is_empty_array() {
+        let json = pending_json(&[]).unwrap();
         assert_eq!(json.trim(), "[]");
     }
 }

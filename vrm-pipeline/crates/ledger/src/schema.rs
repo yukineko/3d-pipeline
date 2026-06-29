@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS records (
     asset_ref         TEXT NOT NULL DEFAULT '{}',
     derived           TEXT NOT NULL DEFAULT '{}',
     parent_id         TEXT,
-    image_ref         TEXT
+    image_ref         TEXT,
+    status            TEXT NOT NULL DEFAULT 'done'
 );
 "#;
 
@@ -25,6 +26,11 @@ pub const MIGRATE_V3_SQL: &str = "ALTER TABLE records ADD COLUMN parent_id TEXT;
 
 // Idempotent migration: add image_ref column (input image path) to DBs created before schema v4.
 pub const MIGRATE_V4_SQL: &str = "ALTER TABLE records ADD COLUMN image_ref TEXT;";
+
+// Idempotent migration: add status column (lifecycle state) to DBs created before schema v5.
+// Legacy rows default to 'done' since they predate the reservation queue.
+pub const MIGRATE_V5_SQL: &str =
+    "ALTER TABLE records ADD COLUMN status TEXT NOT NULL DEFAULT 'done';";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Record {
@@ -41,4 +47,6 @@ pub struct Record {
     pub parent_id: Option<String>,
     /// path to the input image used to generate this record (None if none).
     pub image_ref: Option<String>,
+    /// lifecycle state: 'reserved' | 'generating' | 'done' (legacy rows = 'done').
+    pub status: String,
 }
