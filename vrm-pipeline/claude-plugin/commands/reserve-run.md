@@ -59,8 +59,13 @@ ledger set-status --id <id> --status generating
 - **Image → VRM** — `image_ref` present (no `vroid_edit`): emit
   `{parent_id, image_ref}`. Pipeline routes through Hyper3D image→GLB
   (`generate.py`) → `render.vrm_convert.glb_to_vrm`.
-- **Prompt → object** — neither of the above: emit just `{parent_id}`.
-  Pipeline routes through Gemini Blender codegen (`generate.py`).
+- **Prompt → object (non-VRM GLB)** — `generation_params.asset_type == "object"`
+  (or neither VRoid-edit nor image is set): emit `{parent_id, asset_type: "object"}`.
+  Pipeline Branch C routes through Gemini Blender codegen (`generate.py --prompt`),
+  which produces an **object GLB** (`asset_type:"object"`, pipeline.py) — there is
+  **no VRM** for this mode. Renders use the object view set (`render/object.py`:
+  `obj_front` / `obj_persp` / `obj_side` / `obj_top` / `context_front` / `context_persp`),
+  not the VRM face/body views.
 
 Emit the drop (let `stem` be a slug of the reservation, e.g. its id):
 
@@ -80,18 +85,34 @@ python pipeline.py <stem>.prompt --output-base <output-base> --db-path <db>
 Do **not** hand-roll generation — reuse `pipeline.py` / `generate.py` /
 `render.vrm_convert` exactly as above.
 
-**c. Fulfill** once the pipeline finishes and the 7 WebP views exist at
-`{output_base}/renders/{stem}/` (`face_front` / `body_front` / ... +
-`manifest.json`), with the final VRM at `{output_base}/renders/{stem}/generated/{stem}.vrm`:
+**c. Fulfill** once the pipeline finishes and the renders exist at
+`{output_base}/renders/{stem}/` (+ `manifest.json`). The `--asset-ref` shape
+depends on `asset_type`:
 
-```bash
-ledger fulfill --id <id> \
-  --r0-dir <output_base>/renders/<stem> \
-  --asset-ref '{"vrm":"<.../generated/<stem>.vrm>","glb":"<.../model.glb>"}' \
-  --generation-params '<gen_params json from the pipeline run>'
-```
+- **VRM** (VRoid-edit / image→VRM): 7 face/body WebP views (`face_front` /
+  `body_front` / ...), final VRM at `{output_base}/renders/{stem}/generated/{stem}.vrm`:
 
-`fulfill` attaches the outputs and flips `status` → `done`.
+  ```bash
+  ledger fulfill --id <id> \
+    --r0-dir <output_base>/renders/<stem> \
+    --asset-ref '{"vrm":"<.../generated/<stem>.vrm>","glb":"<.../model.glb>"}' \
+    --generation-params '<gen_params json from the pipeline run>'
+  ```
+
+- **Object** (`asset_type == "object"`): object-view WebP renders (`obj_front` /
+  `obj_persp` / ...) and a **GLB-only** asset (no VRM) — set `asset-ref` to the
+  GLB alone:
+
+  ```bash
+  ledger fulfill --id <id> \
+    --r0-dir <output_base>/renders/<stem> \
+    --asset-ref '{"glb":"<.../generated/<stem>.glb>"}' \
+    --generation-params '<gen_params json, includes asset_type:"object">'
+  ```
+
+`fulfill` attaches the outputs and flips `status` → `done`. The viewer thumbnail
+loader recognizes both view sets, so object nodes get a real thumbnail (it prefers
+`obj_front` / `obj_persp`).
 
 **d. On failure** (pipeline error, Blender crash, no renders produced):
 
