@@ -1,6 +1,6 @@
 {
   "name": "vrm-pipeline",
-  "version": "0.3.0",
-  "description": "Slash commands for the VRM pipeline CLIs: derive, dist, ledger, vrm-watch, edit, convert",
+  "version": "0.4.0",
+  "description": "Slash commands for the VRM pipeline CLIs: derive, dist, ledger, vrm-watch, edit, convert, reserve-run, capture-object",
   "author": { "name": "Nakayama Hiroyuki" }
 }
