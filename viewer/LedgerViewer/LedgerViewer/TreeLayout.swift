@@ -17,6 +17,38 @@ struct LaidOutForest {
     var size: CGSize
 }
 
+/// Pure geometry for interactive node placement: per-node drag offsets and
+/// marquee (drag-box) selection. Deliberately SwiftUI-free so it can be unit
+/// tested headlessly (Tests/main.swift) alongside the layout pass.
+enum NodeGeometry {
+    /// Normalized rectangle spanning two corner points, regardless of drag
+    /// direction (so a bottom-right→top-left drag yields the same box).
+    static func rect(from a: CGPoint, to b: CGPoint) -> CGRect {
+        CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
+               width: abs(a.x - b.x), height: abs(a.y - b.y))
+    }
+
+    /// On-screen center = layout center + committed manual offset. (Live in-flight
+    /// drag is layered on by the caller.)
+    static func center(base: CGPoint, offset: CGSize?) -> CGPoint {
+        guard let offset else { return base }
+        return CGPoint(x: base.x + offset.width, y: base.y + offset.height)
+    }
+
+    /// IDs whose node box (centered at `center`, sized `nodeSize`) intersects the
+    /// marquee rectangle.
+    static func hits(marquee: CGRect,
+                     centers: [(id: String, center: CGPoint)],
+                     nodeSize: CGSize) -> [String] {
+        centers.compactMap { item in
+            let frame = CGRect(x: item.center.x - nodeSize.width / 2,
+                               y: item.center.y - nodeSize.height / 2,
+                               width: nodeSize.width, height: nodeSize.height)
+            return marquee.intersects(frame) ? item.id : nil
+        }
+    }
+}
+
 /// Tidy tree layout (Reingold–Tilford style, simplified).
 ///
 /// Post-order walk: each leaf claims the next free column; each internal node is

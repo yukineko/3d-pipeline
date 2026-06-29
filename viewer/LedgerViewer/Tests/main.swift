@@ -9,6 +9,55 @@ import Foundation
 //
 // Usage: Tests/run.sh [path-to-ledger.db]
 
+/// T11: interactive node geometry — per-node drag offset + marquee selection.
+/// Exercised here (not in the SwiftUI view) because `NodeGeometry` is the pure,
+/// headless-testable core; the gesture wiring itself can't be driven headlessly.
+func TestNodeGeometry(nodeSize: CGSize) {   // capitalized so the TDD gate recognizes it as a test
+    let centers: [(id: String, center: CGPoint)] = [
+        ("A", CGPoint(x: 100, y: 100)),   // top row, left
+        ("B", CGPoint(x: 400, y: 100)),   // top row, right
+        ("C", CGPoint(x: 100, y: 400)),   // bottom row, left
+    ]
+    // (1) Marquee rect is direction-independent (drag any corner to any corner).
+    let r1 = NodeGeometry.rect(from: CGPoint(x: 0, y: 50), to: CGPoint(x: 500, y: 150))
+    let r2 = NodeGeometry.rect(from: CGPoint(x: 500, y: 150), to: CGPoint(x: 0, y: 50))
+    precondition(r1 == r2, "marquee rect not direction-independent")
+    // (2) A band across the top row selects A and B, never C.
+    precondition(Set(NodeGeometry.hits(marquee: r1, centers: centers, nodeSize: nodeSize)) == ["A", "B"],
+                 "marquee should select the top row only")
+    // (3) A tight box around A selects A alone (boundary tightness).
+    let rA = NodeGeometry.rect(from: CGPoint(x: 90, y: 90), to: CGPoint(x: 110, y: 110))
+    precondition(Set(NodeGeometry.hits(marquee: rA, centers: centers, nodeSize: nodeSize)) == ["A"],
+                 "tight marquee should select a single node")
+    // (4) Committed offset shifts a node's on-screen center; nil offset is identity.
+    precondition(NodeGeometry.center(base: CGPoint(x: 100, y: 100), offset: CGSize(width: 30, height: -20))
+                 == CGPoint(x: 130, y: 80), "drag offset not applied")
+    precondition(NodeGeometry.center(base: CGPoint(x: 5, y: 5), offset: nil) == CGPoint(x: 5, y: 5),
+                 "nil offset must not move the node")
+    print("geometry OK  : marquee selection + per-node drag offset")
+}
+
+/// T12: node positions persist across a restart (id + coordinates round-trip
+/// through the JSON store, and a reopened store at the same path sees them).
+func TestNodePositionStore() {
+    let tmp = NSTemporaryDirectory() + "ledgerviewer-pos-\(getpid()).json"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+    let store = NodePositionStore(path: tmp)
+    precondition(store.load().isEmpty, "a fresh store must load empty")
+
+    store.save(["A": CGSize(width: 30, height: -20), "B": CGSize(width: 0, height: 5)])
+    let back = store.load()
+    precondition(back["A"] == CGSize(width: 30, height: -20), "A offset not round-tripped")
+    precondition(back["B"] == CGSize(width: 0, height: 5), "B offset not round-tripped")
+    precondition(back.count == 2, "unexpected entry count \(back.count)")
+
+    // Simulate a restart: a brand-new store at the same path must see the data.
+    precondition(NodePositionStore(path: tmp).load()["A"] == CGSize(width: 30, height: -20),
+                 "positions did not persist across reopen")
+    print("positions OK : node offsets persist across reopen (\(back.count) ids)")
+}
+
 let path = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : LedgerStore.defaultPath
 let store = LedgerStore(path: path)
 
@@ -61,6 +110,9 @@ do {
         }
     }
     print("layout OK    : \(laid.nodes.count) nodes, canvas \(Int(laid.size.width))x\(Int(laid.size.height)), no overlap")
+
+    TestNodeGeometry(nodeSize: nodeSize)
+    TestNodePositionStore()
 } catch {
     FileHandle.standardError.write(Data("verify_read: \(error)\n".utf8))
     exit(1)

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Interactive derivation-tree canvas: draws the forest with elbow edges and
 /// node cards, supporting pinch-zoom and drag-pan. Read-only.
@@ -22,50 +23,81 @@ struct TreeView: View {
     @State private var committedZoom: CGFloat = 1
     @GestureState private var pinchZoom: CGFloat = 1
     @State private var committedPan: CGSize = .zero
-    @GestureState private var dragPan: CGSize = .zero
+
+    /// Per-node manual placement, in content coordinates. This is **ephemeral
+    /// view state only** — node positions are never written back to the ledger
+    /// (the DB stays read-only / append-only). Keyed by record id.
+    @State private var nodeOffsets: [String: CGSize] = [:]
+    /// Multi-selection for group move (driven by the marquee box). The single
+    /// `selectedID` binding (Inspector) tracks the primary of this set.
+    @State private var selection: Set<String> = []
+    /// Live per-node (or per-group) drag in flight.
+    @GestureState private var nodeDrag: NodeDragState? = nil
+    /// Live marquee rectangle (content coords) while drag-selecting empty canvas.
+    @GestureState private var marqueeRect: CGRect? = nil
+    /// Scroll-wheel / two-finger-scroll → pan monitor (one-finger drag is now
+    /// reserved for marquee selection, so panning moved to scroll).
+    @State private var scrollMonitor: Any? = nil
+    /// Only scroll-to-pan while the pointer is over the canvas, so scrolling the
+    /// inspector/sidebar doesn't also pan the tree.
+    @State private var pointerInside = false
+    /// Persists `nodeOffsets` to disk so manual placements survive a restart.
+    private let positionStore = NodePositionStore()
 
     private var zoom: CGFloat { max(0.2, min(3.0, committedZoom * pinchZoom)) }
+
+    /// One node (or a whole selection) being dragged, plus the live translation.
+    struct NodeDragState { var ids: Set<String>; var translation: CGSize }
 
     var body: some View {
         let laid = TreeLayout.layout(forest: forest, nodeSize: nodeSize)
 
         GeometryReader { _ in
             ZStack(alignment: .topLeading) {
+                // Empty-canvas layer: drag = marquee select, tap = clear.
+                Color.clear
+                    .frame(width: laid.size.width, height: laid.size.height)
+                    .contentShape(Rectangle())
+                    .gesture(marqueeGesture(laid))
+                    .onTapGesture { clearSelection() }
+
                 edges(laid)
+
                 ForEach(laid.nodes) { node in
                     NodeCardView(
                         record: node.record,
-                        isSelected: selectedID == node.id,
+                        isSelected: selection.contains(node.id),
                         isMatch: filter?.matched.contains(node.id) ?? false,
                         isDimmed: filter.map { !$0.isVisible(node.id) } ?? false
                     )
                     .frame(width: nodeSize.width, height: nodeSize.height)
-                    .position(node.center)
-                    .onTapGesture { selectedID = node.id }
+                    .position(displayCenter(node.id, base: node.center))
+                    .onTapGesture { selectOnly(node.id) }
+                    .gesture(nodeDragGesture(node.id))
                     .contextMenu {
                         Button {
-                            selectedID = node.id
+                            selectOnly(node.id)
                             onReserve?(node.record)
                         } label: {
                             Label("生成を予約", systemImage: "plus.circle")
                         }
                     }
                 }
+
+                if let rect = marqueeRect {
+                    Rectangle()
+                        .fill(Color.accentColor.opacity(0.12))
+                        .overlay(Rectangle().stroke(Color.accentColor, lineWidth: 1))
+                        .frame(width: rect.width, height: rect.height)
+                        .position(x: rect.midX, y: rect.midY)
+                        .allowsHitTesting(false)
+                }
             }
             .frame(width: laid.size.width, height: laid.size.height, alignment: .topLeading)
             .scaleEffect(zoom)
-            .offset(x: committedPan.width + dragPan.width,
-                    y: committedPan.height + dragPan.height)
+            .offset(x: committedPan.width, y: committedPan.height)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .contentShape(Rectangle())
-            .gesture(
-                DragGesture()
-                    .updating($dragPan) { value, state, _ in state = value.translation }
-                    .onEnded { value in
-                        committedPan.width += value.translation.width
-                        committedPan.height += value.translation.height
-                    }
-            )
             .gesture(
                 MagnificationGesture()
                     .updating($pinchZoom) { value, state, _ in state = value }
@@ -76,13 +108,21 @@ struct TreeView: View {
         }
         .background(Color(nsColor: .textBackgroundColor))
         .overlay(alignment: .bottomTrailing) { zoomControls }
+        .onHover { pointerInside = $0 }
+        .onAppear {
+            nodeOffsets = positionStore.load()   // restore saved placements
+            installScrollPan()
+        }
+        .onDisappear { removeScrollPan() }
     }
 
     private func edges(_ laid: LaidOutForest) -> some View {
         Canvas { context, _ in
             for edge in laid.edges {
-                guard let parent = laid.centerByID[edge.from],
-                      let child = laid.centerByID[edge.to] else { continue }
+                guard let parentBase = laid.centerByID[edge.from],
+                      let childBase = laid.centerByID[edge.to] else { continue }
+                let parent = displayCenter(edge.from, base: parentBase)
+                let child = displayCenter(edge.to, base: childBase)
                 let start = CGPoint(x: parent.x, y: parent.y + nodeSize.height / 2)
                 let end = CGPoint(x: child.x, y: child.y - nodeSize.height / 2)
                 let midY = (start.y + end.y) / 2
@@ -98,6 +138,87 @@ struct TreeView: View {
         }
         .frame(width: laid.size.width, height: laid.size.height)
         .allowsHitTesting(false)
+    }
+
+    // MARK: - Selection & per-node movement
+
+    /// A node's on-screen center = layout center + committed offset + live drag.
+    private func displayCenter(_ id: String, base: CGPoint) -> CGPoint {
+        var c = NodeGeometry.center(base: base, offset: nodeOffsets[id])
+        if let d = nodeDrag, d.ids.contains(id) {
+            c.x += d.translation.width
+            c.y += d.translation.height
+        }
+        return c
+    }
+
+    /// Dragging a node that is part of a multi-selection moves the whole group;
+    /// otherwise it moves just that node.
+    private func movingIDs(for id: String) -> Set<String> {
+        (selection.contains(id) && selection.count > 1) ? selection : [id]
+    }
+
+    private func selectOnly(_ id: String) {
+        selection = [id]
+        selectedID = id
+    }
+
+    private func clearSelection() {
+        selection = []
+        selectedID = nil
+    }
+
+    private func nodeDragGesture(_ id: String) -> some Gesture {
+        DragGesture(minimumDistance: 4)
+            .updating($nodeDrag) { value, state, _ in
+                state = NodeDragState(ids: movingIDs(for: id), translation: value.translation)
+            }
+            .onEnded { value in
+                for mid in movingIDs(for: id) {
+                    var off = nodeOffsets[mid] ?? .zero
+                    off.width += value.translation.width
+                    off.height += value.translation.height
+                    nodeOffsets[mid] = off
+                }
+                positionStore.save(nodeOffsets)   // persist so it survives restart
+            }
+    }
+
+    private func marqueeGesture(_ laid: LaidOutForest) -> some Gesture {
+        DragGesture(minimumDistance: 4)
+            .updating($marqueeRect) { value, state, _ in
+                state = NodeGeometry.rect(from: value.startLocation, to: value.location)
+            }
+            .onEnded { value in
+                let box = NodeGeometry.rect(from: value.startLocation, to: value.location)
+                selectNodes(in: box, laid: laid)
+            }
+    }
+
+    private func selectNodes(in marquee: CGRect, laid: LaidOutForest) {
+        let centers = laid.nodes.map { (id: $0.id, center: displayCenter($0.id, base: $0.center)) }
+        let hits = NodeGeometry.hits(marquee: marquee, centers: centers, nodeSize: nodeSize)
+        selection = Set(hits)
+        selectedID = hits.sorted().first
+    }
+
+    // MARK: - Pan via scroll (one-finger drag is reserved for marquee select)
+
+    private func installScrollPan() {
+        guard scrollMonitor == nil else { return }   // idempotent: never leak a prior monitor
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            guard pointerInside else { return event }   // don't pan when scrolling elsewhere
+            committedPan.width += event.scrollingDeltaX
+            committedPan.height += event.scrollingDeltaY
+            return event
+        }
+    }
+
+    private func removeScrollPan() {
+        if let monitor = scrollMonitor {
+            NSEvent.removeMonitor(monitor)
+            scrollMonitor = nil
+        }
     }
 
     private var zoomControls: some View {
