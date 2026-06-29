@@ -15,6 +15,7 @@
 		1A000000000000000000001D /* Thumbnail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000001C /* Thumbnail.swift */; };
 		1A000000000000000000001F /* InspectorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000001E /* InspectorView.swift */; };
 		1A0000000000000000000021 /* LedgerWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000020 /* LedgerWatcher.swift */; };
+		1A0000000000000000000023 /* ReservationSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000022 /* ReservationSheet.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +28,7 @@
 		1A000000000000000000001C /* Thumbnail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Thumbnail.swift; sourceTree = "<group>"; };
 		1A000000000000000000001E /* InspectorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorView.swift; sourceTree = "<group>"; };
 		1A0000000000000000000020 /* LedgerWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LedgerWatcher.swift; sourceTree = "<group>"; };
+		1A0000000000000000000022 /* ReservationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReservationSheet.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -67,6 +69,7 @@
 				1A000000000000000000001C /* Thumbnail.swift */,
 				1A000000000000000000001E /* InspectorView.swift */,
 				1A0000000000000000000020 /* LedgerWatcher.swift */,
+				1A0000000000000000000022 /* ReservationSheet.swift */,
 			);
 			path = LedgerViewer;
 			sourceTree = "<group>";
@@ -147,6 +150,7 @@
 				1A000000000000000000001D /* Thumbnail.swift in Sources */,
 				1A000000000000000000001F /* InspectorView.swift in Sources */,
 				1A0000000000000000000021 /* LedgerWatcher.swift in Sources */,
+				1A0000000000000000000023 /* ReservationSheet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var selectedID: String?
     @State private var searchText = ""
     @State private var adoptedOnly = false
+    @State private var reservationParent: LedgerRecord?
     @StateObject private var watcher = LedgerWatcher(path: LedgerStore.defaultPath)
 
     private let store = LedgerStore()
@@ -60,7 +61,8 @@ struct ContentView: View {
     var body: some View {
         Group {
             if case .loaded(let forest) = state {
-                TreeView(forest: forest, selectedID: $selectedID, filter: treeFilter)
+                TreeView(forest: forest, selectedID: $selectedID, filter: treeFilter,
+                         onReserve: { reservationParent = $0 })
             } else {
                 statusView
             }
@@ -69,11 +71,18 @@ struct ContentView: View {
         .searchable(text: $searchText, placement: .toolbar, prompt: "Search prompt, id, or tag")
         .inspector(isPresented: .constant(selectedRecord != nil)) {
             if let record = selectedRecord {
-                InspectorView(record: record)
+                InspectorView(record: record, onReserveChild: { reservationParent = $0 })
                     .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
             } else {
                 Text("Select a node").foregroundStyle(.secondary)
             }
+        }
+        .sheet(item: $reservationParent) { parent in
+            ReservationSheet(parent: parent, onReserved: { _ in
+                // The new pending row appears live via LedgerWatcher; reload
+                // immediately too so it shows even if the watcher is slow.
+                load()
+            })
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -81,7 +90,10 @@ struct ContentView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 if let forest {
-                    Text("\(forest.records.count) records · \(forest.roots.count) roots")
+                    let pending = forest.records.filter(\.isPending).count
+                    Text(pending > 0
+                         ? "\(forest.records.count) records · \(forest.roots.count) roots · \(pending) pending ⏳"
+                         : "\(forest.records.count) records · \(forest.roots.count) roots")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
