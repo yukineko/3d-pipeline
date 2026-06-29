@@ -14,6 +14,8 @@ struct TreeView: View {
     let forest: LedgerForest
     @Binding var selectedID: String?
     var filter: TreeFilter?
+    /// Invoked when the user picks "生成を予約" from a node's context menu.
+    var onReserve: ((LedgerRecord) -> Void)? = nil
 
     private let nodeSize = CGSize(width: 156, height: 84)
 
@@ -40,6 +42,14 @@ struct TreeView: View {
                     .frame(width: nodeSize.width, height: nodeSize.height)
                     .position(node.center)
                     .onTapGesture { selectedID = node.id }
+                    .contextMenu {
+                        Button {
+                            selectedID = node.id
+                            onReserve?(node.record)
+                        } label: {
+                            Label("生成を予約", systemImage: "plus.circle")
+                        }
+                    }
                 }
             }
             .frame(width: laid.size.width, height: laid.size.height, alignment: .topLeading)
@@ -109,10 +119,43 @@ struct NodeCardView: View {
     var isMatch: Bool = false
     var isDimmed: Bool = false
 
+    private var isPending: Bool { record.isPending }
+
     private var borderColor: Color {
         if isSelected { return .accentColor }
+        if isPending { return .orange }   // amber: reserved/generating stand out
         if isMatch { return .orange }
         return .secondary.opacity(0.3)
+    }
+
+    private var borderWidth: CGFloat {
+        if isSelected || isMatch || isPending { return 2 }
+        return 1
+    }
+
+    /// Status badge next to the id: ⏳ reserved, ⚙ generating, ✓ adopted/done,
+    /// ✗ failed. (`done` keeps the existing adopted ✓ behaviour.)
+    @ViewBuilder private var statusBadge: some View {
+        switch record.statusKind {
+        case .reserved:
+            Image(systemName: "hourglass")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        case .generating:
+            Image(systemName: "gearshape.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        case .failed:
+            Image(systemName: "xmark.octagon.fill")
+                .font(.caption2)
+                .foregroundStyle(.red)
+        case .done:
+            if record.isAdopted {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+            }
+        }
     }
 
     var body: some View {
@@ -125,11 +168,7 @@ struct NodeCardView: View {
                     Text(record.shortID)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
-                    if record.isAdopted {
-                        Image(systemName: "checkmark.seal.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.green)
-                    }
+                    statusBadge
                 }
                 Text(record.prompt.isEmpty ? "(no prompt)" : record.prompt)
                     .font(.caption)
@@ -145,7 +184,7 @@ struct NodeCardView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 9)
-                .strokeBorder(borderColor, lineWidth: (isSelected || isMatch) ? 2 : 1)
+                .strokeBorder(borderColor, lineWidth: borderWidth)
         )
         .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
         .opacity(isDimmed ? 0.22 : 1)

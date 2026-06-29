@@ -60,11 +60,38 @@ emits the whole forest as JSON (records with `parent_id`).
 - **Live refresh** — the view reloads as the pipeline writes new records
   (directory FS events + a SQLite header change-counter poll).
 
-## Read-only guarantee
+## Read-only / append-only guarantee
 
-The viewer **never writes to the ledger**. The database is opened read-only, and
-the only OS interaction that touches the filesystem is "Reveal in Finder" on an
-asset/render path. There are no insert/update/delete code paths.
+The viewer is **append-only**: existing records are never mutated; the viewer
+only appends new pending reservation rows via the official `ledger reserve` CLI
+(the DB connection itself remains `SQLITE_OPEN_READONLY`). The viewer never
+issues SQL `INSERT`/`UPDATE`/`DELETE` and never opens the DB for writing — all
+mutation goes through the Rust `ledger` binary, which owns the schema. The only
+other filesystem interactions are "Reveal in Finder" on an asset/render path and
+copying a chosen reservation image into `~/.vrm-pipeline/reservations/`.
+
+## 生成予約 (reservation)
+
+You can queue a new child generation directly from the tree:
+
+1. **Select a node** (or right-click it) and choose **子を予約 / 生成を予約**.
+2. The **予約 sheet** opens — enter a prompt, optionally pick an input image
+   (copied into `~/.vrm-pipeline/reservations/`), and toggle change / vroid-edit
+   mode. Press **予約**.
+3. The viewer shells out to **`ledger reserve --prompt <text> --parent-id <id>
+   [--image-ref <path>]`**, which appends a new row with `status = reserved`.
+4. The new **pending node (⏳) appears live** in the tree (yellow/amber border),
+   thanks to the live-refresh watcher — no manual reload needed.
+5. **Claude Code fulfills it**: the pipeline picks up reserved rows, runs the
+   generation (status moves to ⚙ generating, then ✓ done or ✗ failed), and the
+   node updates in place.
+
+Status badges on each card: ⏳ reserved, ⚙ generating, ✓ done (adopted),
+✗ failed.
+
+The reservation flow never writes SQLite from Swift — it only invokes the
+`ledger` CLI. The binary is resolved via the `LEDGER_BIN` env var, then common
+build outputs (`…/vrm-pipeline/target/release/ledger`), then `PATH`.
 
 ## Verification
 

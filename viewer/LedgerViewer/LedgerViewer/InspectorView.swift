@@ -6,22 +6,55 @@ import SwiftUI
 /// generation params. Nothing here mutates the ledger.
 struct InspectorView: View {
     let record: LedgerRecord
+    /// Called when the user taps "子を予約" to reserve a child generation.
+    var onReserveChild: ((LedgerRecord) -> Void)? = nil
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 header
                 Divider()
+                statusSection
                 promptSection
                 outcomeSection
                 if !record.tags.isEmpty { tagsSection }
                 pathsSection
                 paramsSection
+                reserveSection
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(minWidth: 280)
+    }
+
+    private var statusLabel: String {
+        switch record.statusKind {
+        case .reserved: return "reserved ⏳"
+        case .generating: return "generating ⚙"
+        case .failed: return "failed ✗"
+        case .done: return record.isAdopted ? "done (adopted) ✓" : "done"
+        }
+    }
+
+    @ViewBuilder private var statusSection: some View {
+        section("Status") {
+            Text(statusLabel)
+                .font(.callout)
+                .foregroundStyle(record.isPending ? .orange : .primary)
+        }
+    }
+
+    @ViewBuilder private var reserveSection: some View {
+        Divider()
+        Button {
+            onReserveChild?(record)
+        } label: {
+            Label("子を予約", systemImage: "plus.circle")
+                .frame(maxWidth: .infinity)
+        }
+        .controlSize(.large)
+        .help("この生成を親に新しい生成を予約します (ledger reserve)")
     }
 
     private var header: some View {

@@ -21,6 +21,7 @@ struct LedgerRecord: Identifiable, Hashable {
     let derived: String            // raw JSON: { embed, tag }
     let parentID: String?          // lineage parent; nil/dangling => root
     let imageRef: String?          // input image path
+    let status: String             // reserved/generating/done/failed (default "done")
 }
 
 extension LedgerRecord {
@@ -74,6 +75,25 @@ extension LedgerRecord {
     }
 
     var shortID: String { String(id.prefix(8)) }
+
+    /// Lifecycle status of the record. `status` is a free-text column (the
+    /// `ledger` CLI writes reserved/generating/done/failed); we normalise it to
+    /// a small enum and default to `.done` for legacy rows / unknown values.
+    enum StatusKind { case reserved, generating, done, failed }
+
+    var statusKind: StatusKind {
+        switch status.lowercased() {
+        case "reserved": return .reserved
+        case "generating": return .generating
+        case "failed": return .failed
+        default: return .done
+        }
+    }
+
+    /// A pending row (reserved or generating) is awaiting fulfilment.
+    var isPending: Bool {
+        switch statusKind { case .reserved, .generating: return true; default: return false }
+    }
 }
 
 // MARK: - Forest
@@ -146,9 +166,15 @@ struct LedgerStore {
         }
         defer { sqlite3_close(db) }
 
+        // The `status` column was added later (T1); older DBs lack it. Detect
+        // its presence so the SELECT never fails on a legacy schema, and default
+        // missing/legacy rows to "done".
+        let hasStatus = columnExists(db, table: "records", column: "status")
+
+        let statusCol = hasStatus ? ", status" : ""
         let sql = """
         SELECT id, timestamp, prompt, generation_params, r0_ref, r1_ref, \
-        outcome, asset_ref, derived, parent_id, image_ref \
+        outcome, asset_ref, derived, parent_id, image_ref\(statusCol) \
         FROM records ORDER BY timestamp ASC
         """
         var stmt: OpaquePointer?
@@ -164,6 +190,7 @@ struct LedgerStore {
 
         var out: [LedgerRecord] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
+            let status: String = hasStatus ? (optText(11) ?? "done") : "done"
             out.append(LedgerRecord(
                 id: text(0),
                 timestamp: text(1),
@@ -175,10 +202,27 @@ struct LedgerStore {
                 assetRef: text(7),
                 derived: text(8),
                 parentID: optText(9),
-                imageRef: optText(10)
+                imageRef: optText(10),
+                status: status.isEmpty ? "done" : status
             ))
         }
         return out
+    }
+
+    /// Read-only check for whether `column` exists on `table` via PRAGMA.
+    private func columnExists(_ db: OpaquePointer?, table: String, column: String) -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(table))", -1, &stmt, nil) == SQLITE_OK else {
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            // column 1 of table_info is the column name.
+            if let name = sqlite3_column_text(stmt, 1), String(cString: name) == column {
+                return true
+            }
+        }
+        return false
     }
 
     /// Convenience: read all records and build the forest in one call.
