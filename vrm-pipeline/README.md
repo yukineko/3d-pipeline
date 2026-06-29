@@ -300,6 +300,35 @@ vrm = glb_to_vrm("model.glb", "model.vrm")
 
 ---
 
+## 生成予約キュー (reservation queue)
+
+ビューア上で「この系統からもう一案ほしい」と思ったとき、その場で**予約**だけを置いて、
+実際の生成は後でまとめて Claude Code に流す経路。生成は**新規ロジックを書かず**、既存の
+`pipeline.py` / `generate.py` / `render.vrm_convert` をそのまま再利用する。
+
+エンドツーエンドの流れ:
+
+1. **ビューアで予約** — 親ノードを選び「予約」シートで prompt（任意で参照画像）を入力すると、
+   ビューアが `ledger reserve --prompt <text> [--parent-id <id>] [--image-ref <path>]` を呼ぶ。
+   これは **append-only の pending 行**を 1 つ足すだけ（`status='reserved'`、`r0_ref` は空）。
+2. **ノードが即座に出る** — ライブ更新（SQLite change-counter 監視）で、予約ノードが ⏳ バッジ付きで
+   樹形図にすぐ現れる。出力はまだ無い。
+3. **Claude Code がキューを drain** — `ledger pending --json` で予約一覧を取得し、各予約について
+   `set-status --status generating` → 既存生成スタックを起動（mode は `image_ref` /
+   `generation_params.vroid_edit` で prompt / image / VRoid 編集を選択。`<stem>.prompt` +
+   `<stem>.params.json` の drop を出して `vrm-watch` / `pipeline.py` に拾わせるか、直接呼ぶ）。
+   詳細は `claude-plugin/commands/reserve-run.md` 参照。
+4. **fulfill** — renders が `{output_base}/renders/{stem}/` に揃ったら
+   `ledger fulfill --id <id> --r0-dir <その dir> --asset-ref '{"vrm":"...","glb":"..."}'` で
+   出力を紐づけ、`status` を `done` に倒す（失敗時は `set-status --status failed`）。
+5. **ビューアが更新** — バッジが ⏳ → ⚙ → ✓ と自動で進む。
+
+> pending レコードは `r0_ref` が空だが、`derive.py` の参照解決
+> （`resolve_image_from_record` / `resolve_base_vrm_from_record`）は空の `r0_ref` を
+> **グレースフルにスキップ**するため、予約直後でも派生の起点として安全に扱える。
+
+---
+
 ## 段階導入計画
 
 | Phase | 内容 | 状態 |
