@@ -7,6 +7,20 @@ use crate::schema::{
     CREATE_TABLE_SQL, MIGRATE_V2_SQL, MIGRATE_V3_SQL, MIGRATE_V4_SQL, MIGRATE_V5_SQL, Record,
 };
 
+/// Apply the idempotent schema migrations to an open connection.
+///
+/// Each ALTER is best-effort: it errors (harmlessly, ignored) when the column
+/// already exists, or when the `records` table does not yet exist (a brand-new
+/// DB before `init`'s CREATE TABLE). Running this from `open` means every
+/// ordinary command (insert/get/list/...) auto-migrates a legacy DB created
+/// before a column was added — no manual `ledger init` re-run required.
+fn apply_migrations(conn: &Connection) {
+    let _ = conn.execute_batch(MIGRATE_V2_SQL);
+    let _ = conn.execute_batch(MIGRATE_V3_SQL);
+    let _ = conn.execute_batch(MIGRATE_V4_SQL);
+    let _ = conn.execute_batch(MIGRATE_V5_SQL);
+}
+
 pub fn open(db_path: &std::path::Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -14,6 +28,8 @@ pub fn open(db_path: &std::path::Path) -> Result<Connection> {
     }
     let conn = Connection::open(db_path)
         .with_context(|| format!("failed to open DB: {}", db_path.display()))?;
+    // Auto-migrate on every open so legacy DBs gain new columns without `init`.
+    apply_migrations(&conn);
     Ok(conn)
 }
 
@@ -21,11 +37,8 @@ pub fn init(db_path: &std::path::Path) -> Result<()> {
     let conn = open(db_path)?;
     conn.execute_batch(CREATE_TABLE_SQL)
         .context("failed to create table")?;
-    // Idempotent migrations: ignore error if column already exists.
-    let _ = conn.execute_batch(MIGRATE_V2_SQL);
-    let _ = conn.execute_batch(MIGRATE_V3_SQL);
-    let _ = conn.execute_batch(MIGRATE_V4_SQL);
-    let _ = conn.execute_batch(MIGRATE_V5_SQL);
+    // Re-run after CREATE TABLE so a freshly-created legacy table is migrated.
+    apply_migrations(&conn);
     Ok(())
 }
 
@@ -763,5 +776,44 @@ mod tests {
         init(&db_path).unwrap();
         let r = get_record(&db_path, "legacy").unwrap();
         assert_eq!(r.status, "done");
+    }
+
+    #[test]
+    fn test_open_auto_migrates_legacy_db_without_init() {
+        // Regression: migrations must run on open(), not only init(). A legacy
+        // DB (table without status) must auto-migrate on the FIRST ordinary
+        // command (insert goes through open) — no explicit init() call.
+        let (_dir, db_path) = temp_db();
+        {
+            let conn = open(&db_path).unwrap();
+            // pre-v5 schema: table without status column
+            conn.execute_batch(
+                "CREATE TABLE records (
+                    id TEXT PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    prompt TEXT NOT NULL DEFAULT '',
+                    generation_params TEXT NOT NULL DEFAULT '{}',
+                    r0_ref TEXT NOT NULL DEFAULT '',
+                    r1_ref TEXT,
+                    outcome TEXT NOT NULL DEFAULT '{}',
+                    asset_ref TEXT NOT NULL DEFAULT '{}',
+                    derived TEXT NOT NULL DEFAULT '{}',
+                    parent_id TEXT,
+                    image_ref TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO records (id, timestamp, prompt) VALUES ('legacy', '2026-01-01', 'old row')",
+                [],
+            )
+            .unwrap();
+        }
+        // No init() here. insert() goes through open(), which must migrate.
+        let id = insert(&db_path, "new row", "/tmp/r0", "{}", "{}", None, None).unwrap();
+        // The newly-inserted row reads back as done.
+        assert_eq!(get_record(&db_path, &id).unwrap().status, "done");
+        // The legacy row gains status='done' via the ALTER default.
+        assert_eq!(get_record(&db_path, "legacy").unwrap().status, "done");
     }
 }
