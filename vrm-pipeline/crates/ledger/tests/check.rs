@@ -185,13 +185,114 @@ fn r3_default_empty_object_asset_ref_is_clean() {
     assert_eq!(code(&check(&db)), 0);
 }
 
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+fn is_root() -> bool {
+    let o = Command::new("id").arg("-u").output().expect("id -u");
+    String::from_utf8_lossy(&o.stdout).trim() == "0"
+}
+
+/// Run `ledger check` with no --db, controlling HOME.
+fn check_no_db_flag(home: Option<&Path>) -> Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_ledger"));
+    c.arg("check");
+    match home {
+        Some(h) => c.env("HOME", h),
+        None => c.env_remove("HOME"),
+    };
+    c.output().expect("spawn ledger")
+}
+
+fn assert_passes_with_warning(o: &Output, needle: &str, ctx: &str) {
+    assert_eq!(code(o), 0, "{ctx}: {:?}", o);
+    assert!(stdout(o).is_empty(), "{ctx}: stdout must be empty: {:?}", o);
+    let err = stderr(o);
+    assert!(
+        err.contains(needle),
+        "{ctx}: stderr must name {needle}: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("warning"),
+        "{ctx}: stderr must contain a warning: {err}"
+    );
+}
+
+/// Restores permissions on drop (also on panic).
+struct PermGuard(PathBuf, u32);
+impl Drop for PermGuard {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
+    }
+}
+
 #[test]
-fn missing_db_file_exits_2_and_does_not_create_it() {
+fn missing_db_file_warns_exits_0_and_does_not_create_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("nope.db");
     let o = check(&db);
-    assert_cannot_determine(&o, "missing db");
+    assert_passes_with_warning(&o, &db.display().to_string(), "missing db");
     assert!(!db.exists(), "check must not create the DB");
+}
+
+#[test]
+fn dangling_symlink_db_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("link.db");
+    std::os::unix::fs::symlink(dir.path().join("target-missing.db"), &db).unwrap();
+    let o = check(&db);
+    assert_cannot_determine(&o, "dangling symlink");
+}
+
+#[test]
+fn unsearchable_parent_exits_2_and_does_not_create_it() {
+    use std::os::unix::fs::PermissionsExt;
+    if is_root() {
+        eprintln!("skipping: running as root, permissions not enforced");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("locked");
+    std::fs::create_dir(&parent).unwrap();
+    let db = parent.join("ledger.db");
+    let _guard = PermGuard(parent.clone(), 0o755);
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let o = check(&db);
+    assert_cannot_determine(&o, "unsearchable parent");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!db.exists(), "check must not create the DB");
+}
+
+#[test]
+fn db_path_is_directory_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("adir.db");
+    std::fs::create_dir(&db).unwrap();
+    let o = check(&db);
+    assert_cannot_determine(&o, "db is a directory");
+}
+
+#[test]
+fn no_db_flag_and_home_unset_exits_2() {
+    let o = check_no_db_flag(None);
+    assert_cannot_determine(&o, "HOME unset");
+}
+
+#[test]
+fn no_db_flag_default_path_missing_warns_exits_0() {
+    let home = tempfile::tempdir().unwrap();
+    let o = check_no_db_flag(Some(home.path()));
+    assert_passes_with_warning(
+        &o,
+        &home.path().display().to_string(),
+        "default path missing",
+    );
+    assert!(
+        !home.path().join(".vrm-pipeline").exists(),
+        "check must not create the default dir"
+    );
 }
 
 #[test]
