@@ -217,6 +217,18 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Commands::Check)
+        && cli.db.is_none()
+        && std::env::var_os("HOME").is_none_or(|h| h.is_empty())
+    {
+        // Without HOME the default path would fall back to /tmp and check a
+        // ledger that is not the user's; with the missing-DB warning that
+        // would silently pass. Refuse to guess.
+        eprintln!(
+            "ledger check: cannot determine: HOME is unset or empty, so the default ledger path is unknown; pass --db <path>"
+        );
+        std::process::exit(check::EXIT_UNDETERMINED);
+    }
     let db_path = cli.db.clone().unwrap_or_else(default_db_path);
 
     match cli.command {
@@ -274,7 +286,10 @@ fn main() -> Result<()> {
             } else if records.is_empty() {
                 println!("No pending records.");
             } else {
-                println!("{:<38} {:<12} {:<25} {}", "ID", "STATUS", "TIMESTAMP", "PROMPT");
+                println!(
+                    "{:<38} {:<12} {:<25} {}",
+                    "ID", "STATUS", "TIMESTAMP", "PROMPT"
+                );
                 println!("{}", "-".repeat(110));
                 for r in &records {
                     println!(
@@ -380,7 +395,11 @@ fn main() -> Result<()> {
             println!("Saved tags for {id}");
         }
 
-        Commands::UpdateOutcome { id, edit_dist_phash, edit_dist_embed } => {
+        Commands::UpdateOutcome {
+            id,
+            edit_dist_phash,
+            edit_dist_embed,
+        } => {
             if let Some(phash) = edit_dist_phash {
                 db::update_outcome_phash(&db_path, &id, phash)?;
                 println!("Updated outcome for {id}: edit_dist_phash={phash}");
@@ -401,18 +420,16 @@ fn main() -> Result<()> {
             println!("Set r1_ref for {id}: {path}");
         }
 
-        Commands::GetEmbedding { id } => {
-            match db::get_embedding(&db_path, &id)? {
-                Some(vec) => {
-                    let json = serde_json::json!({"id": id, "record_embedding": vec});
-                    println!("{}", serde_json::to_string(&json).unwrap());
-                }
-                None => {
-                    eprintln!("No embedding found for {id}");
-                    std::process::exit(1);
-                }
+        Commands::GetEmbedding { id } => match db::get_embedding(&db_path, &id)? {
+            Some(vec) => {
+                let json = serde_json::json!({"id": id, "record_embedding": vec});
+                println!("{}", serde_json::to_string(&json).unwrap());
             }
-        }
+            None => {
+                eprintln!("No embedding found for {id}");
+                std::process::exit(1);
+            }
+        },
 
         Commands::Similar { embed_json, top_k } => {
             let payload = std::fs::read_to_string(&embed_json)
@@ -642,7 +659,10 @@ mod tests {
 
     #[test]
     fn truncates_long_ascii() {
-        assert_eq!(short_prompt(&"a".repeat(50)), format!("{}...", "a".repeat(35)));
+        assert_eq!(
+            short_prompt(&"a".repeat(50)),
+            format!("{}...", "a".repeat(35))
+        );
     }
 
     #[test]

@@ -2,6 +2,9 @@
 //!
 //! Exit codes:
 //! - 0: clean — every rule was evaluated on every record and none was violated.
+//!   Also 0 when nothing exists at the DB path (the ledger has not been created
+//!   yet): a stderr warning names the path. An unknowable path (unreadable
+//!   parent, dangling symlink, unset/empty HOME without --db) is exit 2.
 //! - 1: violations — one stdout line per violation, naming the record id and
 //!   the rule (`parent-missing`, `lineage-cycle`, `asset-missing`).
 //! - 2: cannot determine — the DB could not be opened/read, the schema lacks a
@@ -32,6 +35,8 @@ pub struct Report {
     pub violations: Vec<String>,
     /// One line per reason the check could not be completed (stderr).
     pub undetermined: Vec<String>,
+    /// Non-blocking notes (stderr). They never change the exit code.
+    pub warnings: Vec<String>,
 }
 
 impl Report {
@@ -54,6 +59,9 @@ pub fn run(db_path: &Path) -> i32 {
     let mut io_failed = false;
     for v in &report.violations {
         io_failed |= writeln!(out, "{v}").is_err();
+    }
+    for w in &report.warnings {
+        let _ = writeln!(err, "ledger check: warning: {w}");
     }
     for u in &report.undetermined {
         let _ = writeln!(err, "ledger check: cannot determine: {u}");
@@ -115,12 +123,35 @@ struct Row {
 pub fn check(db_path: &Path) -> Report {
     let mut report = Report::default();
 
-    if !db_path.exists() {
-        report.undetermined.push(format!(
-            "database file does not exist: {}",
-            db_path.display()
-        ));
-        return report;
+    // Only a confirmed "nothing at this path" means the ledger has not been
+    // created yet (the pipeline never ran here): that is not a defect, so it
+    // passes with a warning. Anything we cannot confirm — an unreadable parent
+    // directory, a dangling symlink to a ledger elsewhere — stays undetermined.
+    match std::fs::symlink_metadata(db_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            report.warnings.push(format!(
+                "no ledger database at {} yet (nothing has been generated on this machine); \
+                 nothing to check",
+                db_path.display()
+            ));
+            return report;
+        }
+        Err(e) => {
+            report.undetermined.push(format!(
+                "cannot tell whether {} exists: {e}",
+                db_path.display()
+            ));
+            return report;
+        }
+        Ok(_) => {
+            if let Err(e) = std::fs::metadata(db_path) {
+                report.undetermined.push(format!(
+                    "{} exists but cannot be resolved (dangling symlink?): {e}",
+                    db_path.display()
+                ));
+                return report;
+            }
+        }
     }
 
     let conn = match Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
