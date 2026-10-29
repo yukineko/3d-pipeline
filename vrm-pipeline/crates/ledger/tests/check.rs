@@ -105,7 +105,10 @@ fn r1_parent_missing_exits_1_naming_id() {
 fn r1_empty_string_parent_is_not_a_violation() {
     let (_d, db) = new_db();
     let id = insert(&db, None, None);
-    sql(&db, &format!("UPDATE records SET parent_id = '' WHERE id = '{id}'"));
+    sql(
+        &db,
+        &format!("UPDATE records SET parent_id = '' WHERE id = '{id}'"),
+    );
     assert_eq!(code(&check(&db)), 0);
 }
 
@@ -113,12 +116,16 @@ fn r1_empty_string_parent_is_not_a_violation() {
 fn r2_self_parent_exits_1() {
     let (_d, db) = new_db();
     let id = insert(&db, None, None);
-    sql(&db, &format!("UPDATE records SET parent_id = id WHERE id = '{id}'"));
+    sql(
+        &db,
+        &format!("UPDATE records SET parent_id = id WHERE id = '{id}'"),
+    );
     let o = check(&db);
     assert_eq!(code(&o), 1, "{:?}", o);
     let out = stdout(&o);
     assert!(
-        out.lines().any(|l| l.contains(&id) && l.contains("lineage-cycle")),
+        out.lines()
+            .any(|l| l.contains(&id) && l.contains("lineage-cycle")),
         "{out}"
     );
 }
@@ -128,7 +135,10 @@ fn r2_two_cycle_exits_1_naming_both() {
     let (_d, db) = new_db();
     let a = insert(&db, None, None);
     let b = insert(&db, Some(&a), None);
-    sql(&db, &format!("UPDATE records SET parent_id = '{b}' WHERE id = '{a}'"));
+    sql(
+        &db,
+        &format!("UPDATE records SET parent_id = '{b}' WHERE id = '{a}'"),
+    );
     let o = check(&db);
     assert_eq!(code(&o), 1, "{:?}", o);
     let out = stdout(&o);
@@ -151,7 +161,8 @@ fn r3_asset_missing_exits_1_naming_id() {
     assert_eq!(code(&o), 1, "{:?}", o);
     let out = stdout(&o);
     assert!(
-        out.lines().any(|l| l.contains(&id) && l.contains("asset-missing")),
+        out.lines()
+            .any(|l| l.contains(&id) && l.contains("asset-missing")),
         "{out}"
     );
 }
@@ -257,7 +268,11 @@ fn r4_check_does_not_migrate_older_schema_db() {
     std::thread::sleep(std::time::Duration::from_millis(50));
     let o = check(&db);
     assert_eq!(code(&o), 0, "{:?}", o);
-    assert_eq!(snapshot(&db), before, "check migrated/modified an older-schema DB");
+    assert_eq!(
+        snapshot(&db),
+        before,
+        "check migrated/modified an older-schema DB"
+    );
     let cols: Vec<String> = {
         let c = Connection::open(&db).unwrap();
         let mut s = c.prepare("PRAGMA table_info(records)").unwrap();
@@ -279,5 +294,111 @@ fn r4_check_does_not_modify_db_with_violations() {
     let before = snapshot(&db);
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert_eq!(code(&check(&db)), 1);
+    assert_eq!(snapshot(&db), before);
+}
+
+// ---- asset_ref undetermined cases (coordinator rulings) -------------------
+// Each must exit 2 with a stderr message naming the record id (never 0/1-only).
+
+fn set_asset_ref(db: &Path, id: &str, value: &str) {
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE records SET asset_ref = ?1 WHERE id = ?2",
+            rusqlite::params![value, id],
+        )
+        .unwrap();
+}
+
+fn assert_undetermined_names(db: &Path, id: &str, ctx: &str) {
+    let o = check(db);
+    assert_cannot_determine(&o, ctx);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains(id),
+        "{ctx}: stderr must name record {id}: {err}"
+    );
+}
+
+fn undetermined_case(value: &str, ctx: &str) {
+    let (_d, db) = new_db();
+    let id = insert(&db, None, None);
+    set_asset_ref(&db, &id, value);
+    assert_undetermined_names(&db, &id, ctx);
+}
+
+#[test]
+fn r3_relative_path_is_undetermined_exit_2() {
+    undetermined_case(r#"{"glb":"a.glb"}"#, "relative path");
+    undetermined_case(r#"{"glb":"./out/a.glb"}"#, "dot-relative path");
+}
+
+#[test]
+fn r3_invalid_json_is_undetermined_exit_2() {
+    undetermined_case("not json at all", "invalid json");
+    undetermined_case("{\"glb\":", "truncated json");
+}
+
+#[test]
+fn r3_non_object_json_is_undetermined_exit_2() {
+    undetermined_case(r#"["/abs/a.glb"]"#, "json array");
+    undetermined_case(r#""/abs/a.glb""#, "json string");
+    undetermined_case("42", "json number");
+    undetermined_case("null", "json null");
+}
+
+#[test]
+fn r3_non_string_value_is_undetermined_exit_2() {
+    undetermined_case(r#"{"glb":42}"#, "number value");
+    undetermined_case(r#"{"glb":null}"#, "null value");
+    undetermined_case(r#"{"glb":["/abs/a.glb"]}"#, "array value");
+    undetermined_case(r#"{"glb":{"p":"/abs/a.glb"}}"#, "object value");
+}
+
+#[test]
+fn r3_empty_string_value_is_undetermined_exit_2() {
+    undetermined_case(r#"{"glb":""}"#, "empty string value");
+}
+
+#[test]
+fn r3_one_bad_value_among_good_ones_is_undetermined() {
+    let (d, db) = new_db();
+    let f = d.path().join("ok.glb");
+    std::fs::write(&f, b"x").unwrap();
+    let id = insert(&db, None, None);
+    set_asset_ref(
+        &db,
+        &id,
+        &format!(r#"{{"glb":"{}","vrm":"rel.vrm"}}"#, f.display()),
+    );
+    assert_undetermined_names(&db, &id, "good + relative");
+}
+
+#[test]
+fn undetermined_wins_over_violations_but_violations_still_printed() {
+    let (_d, db) = new_db();
+    let orphan = insert(&db, Some("ghost-parent"), None);
+    let bad = insert(&db, None, None);
+    set_asset_ref(&db, &bad, r#"{"glb":"relative.glb"}"#);
+    let o = check(&db);
+    assert_cannot_determine(&o, "precedence");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains(&bad), "stderr must name {bad}: {err}");
+    let out = stdout(&o);
+    assert!(
+        out.lines()
+            .any(|l| l.contains(&orphan) && l.contains("parent-missing")),
+        "violation must still be printed on stdout: {out}"
+    );
+}
+
+#[test]
+fn undetermined_check_does_not_modify_db() {
+    let (_d, db) = new_db();
+    let id = insert(&db, None, None);
+    set_asset_ref(&db, &id, "garbage");
+    let before = snapshot(&db);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_undetermined_names(&db, &id, "undetermined readonly");
     assert_eq!(snapshot(&db), before);
 }
