@@ -14,9 +14,9 @@
 //! migrations: `db::open()` is deliberately not used), so the file is never
 //! created or modified.
 
-use rusqlite::types::Value;
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
@@ -70,6 +70,40 @@ pub fn run(db_path: &Path) -> i32 {
     }
     let _ = err.flush();
     report.exit_code()
+}
+
+/// One SQLite cell, converted without any panicking path.
+enum Cell {
+    Null,
+    Text(String),
+    /// TEXT whose bytes are not valid UTF-8 (lossy rendering, error).
+    BadText(String, std::str::Utf8Error),
+    /// Any non-text, non-null storage class.
+    Other(&'static str),
+}
+
+impl Cell {
+    fn from_ref(v: ValueRef<'_>) -> Cell {
+        match v {
+            ValueRef::Null => Cell::Null,
+            ValueRef::Text(b) => match std::str::from_utf8(b) {
+                Ok(s) => Cell::Text(s.to_string()),
+                Err(e) => Cell::BadText(String::from_utf8_lossy(b).into_owned(), e),
+            },
+            ValueRef::Integer(_) => Cell::Other("integer"),
+            ValueRef::Real(_) => Cell::Other("real"),
+            ValueRef::Blob(_) => Cell::Other("blob"),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Cell::Null => "null".to_string(),
+            Cell::Text(s) => format!("text {s:?}"),
+            Cell::BadText(lossy, e) => format!("text is not valid UTF-8 ({e}): {lossy:?}"),
+            Cell::Other(kind) => (*kind).to_string(),
+        }
+    }
 }
 
 struct Row {
@@ -161,11 +195,20 @@ fn load_rows(conn: &Connection, report: &mut Report) -> Option<Vec<Row>> {
         return None;
     }
 
-    let raw: Vec<(Value, Value, Value)> = match conn
+    // Columns are read through `get_ref` into `Cell`, never through
+    // `FromSql for Value`: rusqlite's `Value` conversion panics on non-UTF8
+    // TEXT. A bad cell becomes `Cell::BadText`, i.e. undetermined.
+    let raw: Vec<(Cell, Cell, Cell)> = match conn
         .prepare("SELECT id, parent_id, asset_ref FROM records")
         .and_then(|mut s| {
-            s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<Result<Vec<_>, _>>()
+            s.query_map([], |r| {
+                Ok((
+                    Cell::from_ref(r.get_ref(0)?),
+                    Cell::from_ref(r.get_ref(1)?),
+                    Cell::from_ref(r.get_ref(2)?),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
         }) {
         Ok(r) => r,
         Err(e) => {
@@ -180,33 +223,36 @@ fn load_rows(conn: &Connection, report: &mut Report) -> Option<Vec<Row>> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     for (i, (id, parent, asset_ref)) in raw.into_iter().enumerate() {
         let id = match id {
-            Value::Text(s) if !s.is_empty() => s,
+            Cell::Text(s) if !s.is_empty() => s,
             other => {
                 report.undetermined.push(format!(
-                    "record at row {} has a non-text or empty id: {other:?}",
-                    i + 1
+                    "record at row {} has an unreadable, non-text or empty id: {}",
+                    i + 1,
+                    other.describe()
                 ));
                 continue;
             }
         };
         *seen.entry(id.clone()).or_default() += 1;
         let parent = match parent {
-            Value::Null => None,
-            Value::Text(s) if s.is_empty() => None,
-            Value::Text(s) => Some(s),
+            Cell::Null => None,
+            Cell::Text(s) if s.is_empty() => None,
+            Cell::Text(s) => Some(s),
             other => {
-                report
-                    .undetermined
-                    .push(format!("record {id}: parent_id is not text: {other:?}"));
+                report.undetermined.push(format!(
+                    "record {id}: parent_id is not readable text: {}",
+                    other.describe()
+                ));
                 continue;
             }
         };
         let asset_ref = match asset_ref {
-            Value::Text(s) => Some(s),
+            Cell::Text(s) => Some(s),
             other => {
-                report
-                    .undetermined
-                    .push(format!("record {id}: asset_ref is not text: {other:?}"));
+                report.undetermined.push(format!(
+                    "record {id}: asset_ref is not readable text: {}",
+                    other.describe()
+                ));
                 None
             }
         };
@@ -295,6 +341,36 @@ fn check_lineage(rows: &[Row], report: &mut Report) {
     }
 }
 
+/// Top-level key scan of a JSON object: holds the first repeated key, if any.
+struct TopLevelKeys(Option<String>);
+
+impl<'de> serde::Deserialize<'de> for TopLevelKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = TopLevelKeys;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut m: A,
+            ) -> Result<TopLevelKeys, A::Error> {
+                let mut keys = HashSet::new();
+                let mut dup = None;
+                while let Some(k) = m.next_key::<String>()? {
+                    m.next_value::<serde::de::IgnoredAny>()?;
+                    if dup.is_none() && !keys.insert(k.clone()) {
+                        dup = Some(k);
+                    }
+                }
+                Ok(TopLevelKeys(dup))
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+
 fn check_assets(row: &Row, report: &mut Report) {
     let id = &row.id;
     let Some(text) = &row.asset_ref else {
@@ -315,6 +391,25 @@ fn check_assets(row: &Row, report: &mut Report) {
         ));
         return;
     };
+    // `serde_json::Value` keeps only the last of repeated keys, so an earlier
+    // (missing / relative) path would never be checked. Re-scan the top-level
+    // keys; nested objects need no scan because any non-string value is
+    // already undetermined below.
+    match serde_json::from_str::<TopLevelKeys>(text) {
+        Ok(TopLevelKeys(None)) => {}
+        Ok(TopLevelKeys(Some(dup))) => {
+            report.undetermined.push(format!(
+                "record {id}: asset_ref has duplicate key {dup:?}; which path applies is ambiguous"
+            ));
+            return;
+        }
+        Err(e) => {
+            report
+                .undetermined
+                .push(format!("record {id}: cannot scan asset_ref keys: {e}"));
+            return;
+        }
+    }
     for (kind, v) in map {
         let Some(path) = v.as_str() else {
             report.undetermined.push(format!(
