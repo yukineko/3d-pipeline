@@ -185,6 +185,25 @@ class TestValidatorMandatory(_Hermetic):
         self.assertFalse(json.loads(rp.read_text())["ok"])
 
 
+class TestValidatorExtensionRegression(_Hermetic):
+    """Real Khronos 2.0.0-dev.3.10 rejects .vrm ("unknown file extension", exit 1)."""
+
+    def test_vrm_extension_validates_ok_and_leaves_no_files(self):
+        self.stub(
+            "if not any(a.lower().endswith(('.glb', '.gltf')) for a in sys.argv[1:]):\n"
+            "    sys.stderr.write('unknown file extension'); sys.exit(1)\n"
+            f"print({json.dumps(json.dumps(CLEAN_REPORT))})"
+        )
+        d = self.tmp / "asset"
+        d.mkdir()
+        vrm = write_glb(d / "model.vrm", with_meta_10())
+        before = sorted(x.name for x in d.iterdir())
+        report = vrm_validate.validate_vrm(vrm)
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(sorted(x.name for x in d.iterdir()), before)
+
+
 class TestMetaV10(_Hermetic):
     def setUp(self):
         super().setUp()
@@ -210,7 +229,9 @@ class TestMetaV10(_Hermetic):
         self.assertEqual(report["version"], "1.0")
 
     def test_meta_object_absent(self):
-        self._check(healthy_vrm_10(), "meta")
+        gltf = healthy_vrm_10()
+        del gltf["extensions"]["VRMC_vrm"]["meta"]
+        self._check(gltf, "meta")
 
     def test_meta_not_an_object(self):
         gltf = healthy_vrm_10()
@@ -319,7 +340,9 @@ class TestPipelineGateFailClosed(_Hermetic):
         self.clean_stub()
         out = self.tmp / "out"
         out.mkdir()
-        vrm_path = self.vrm(healthy_vrm_10(), "model.vrm")  # no meta
+        gltf = healthy_vrm_10()
+        del gltf["extensions"]["VRMC_vrm"]["meta"]  # really no meta
+        vrm_path = self.vrm(gltf, "model.vrm")
         report = pipeline._validate_vrm_gate(vrm_path, out)
         self.assertTrue(report["ok"], report)
         vj = json.loads((out / "validation.json").read_text())
