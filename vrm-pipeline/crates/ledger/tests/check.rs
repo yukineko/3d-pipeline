@@ -281,6 +281,37 @@ fn no_db_flag_and_home_unset_exits_2() {
 }
 
 #[test]
+fn no_db_flag_and_home_empty_exits_2_and_creates_nothing() {
+    let cwd = tempfile::tempdir().unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_ledger"))
+        .arg("check")
+        .env("HOME", "")
+        .current_dir(cwd.path())
+        .output()
+        .expect("spawn ledger");
+    assert_cannot_determine(&o, "HOME empty");
+    assert!(
+        !cwd.path().join(".vrm-pipeline").exists(),
+        "check must not create a cwd-relative default dir"
+    );
+}
+
+#[test]
+fn db_flag_given_and_home_empty_missing_file_warns_exits_0() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("missing.db");
+    let o = Command::new(env!("CARGO_BIN_EXE_ledger"))
+        .arg("--db")
+        .arg(&db)
+        .arg("check")
+        .env("HOME", "")
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn ledger");
+    assert_passes_with_warning(&o, &db.display().to_string(), "HOME empty, --db given");
+}
+
+#[test]
 fn no_db_flag_default_path_missing_warns_exits_0() {
     let home = tempfile::tempdir().unwrap();
     let o = check_no_db_flag(Some(home.path()));
