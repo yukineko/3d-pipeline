@@ -1,3 +1,4 @@
+mod check;
 mod db;
 mod schema;
 mod search;
@@ -208,6 +209,10 @@ enum Commands {
         #[arg(long)]
         id: String,
     },
+
+    /// Read-only integrity check (parent-missing / lineage-cycle / asset-missing).
+    /// Exit 0 clean, 1 violations, 2 cannot determine.
+    Check,
 }
 
 fn main() -> Result<()> {
@@ -215,6 +220,10 @@ fn main() -> Result<()> {
     let db_path = cli.db.clone().unwrap_or_else(default_db_path);
 
     match cli.command {
+        Commands::Check => {
+            std::process::exit(check::run(&db_path));
+        }
+
         Commands::Init => {
             db::init(&db_path)?;
             println!("Initialized ledger at {}", db_path.display());
