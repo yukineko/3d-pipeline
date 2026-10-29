@@ -177,6 +177,21 @@ class TestValidatorMandatory(_Hermetic):
         self.stub(f"print({json.dumps(json.dumps(rep))})", exit_code=0)
         self.assert_blocked(self._validate(), "validator")
 
+    def test_numerrors_negative_with_exit_zero_is_error(self):
+        # A negative count is an untrustworthy report: cannot determine -> error.
+        rep = copy.deepcopy(CLEAN_REPORT)
+        rep["issues"]["numErrors"] = -1
+        self.stub(f"print({json.dumps(json.dumps(rep))})", exit_code=0)
+        self.assert_blocked(self._validate(), "validator")
+
+    def test_numerrors_zero_with_exit_zero_stays_ok(self):
+        rep = copy.deepcopy(CLEAN_REPORT)
+        rep["issues"]["numErrors"] = 0
+        self.stub(f"print({json.dumps(json.dumps(rep))})", exit_code=0)
+        report = self._validate()
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["errors"], [])
+
     def test_assert_valid_vrm_raises_when_validator_absent(self):
         p = self.vrm(with_meta_10())
         rp = self.tmp / "validation.json"
