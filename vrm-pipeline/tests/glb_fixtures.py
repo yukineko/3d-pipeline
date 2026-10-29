@@ -37,3 +37,28 @@ def write_glb_for_out_flag(cmd, total_size: int = _GLB_DEFAULT_SIZE) -> None:
     except (ValueError, IndexError):
         return
     write_minimal_glb(out_path, total_size)
+
+
+def install_clean_gltf_validator(testcase, tmpdir) -> None:
+    """
+    Make the Khronos glTF-Validator resolve to a stub that reports zero issues,
+    and make PATH empty so a real installed ``gltf_validator`` is never used.
+    Env is restored at testcase cleanup.  The validator is mandatory, so tests
+    that expect a passing VRM must call this.
+    """
+    import json as _json
+    import os as _os
+    import stat as _stat
+    import sys as _sys
+    from unittest.mock import patch as _patch
+
+    tmpdir = Path(tmpdir)
+    emptybin = tmpdir / "emptybin"
+    emptybin.mkdir(exist_ok=True)
+    stub = tmpdir / "clean_gltf_validator"
+    report = {"issues": {"numErrors": 0, "numWarnings": 0, "numInfos": 0,
+                         "numHints": 0, "messages": [], "truncated": False}}
+    stub.write_text(f"#!{_sys.executable}\nprint({_json.dumps(_json.dumps(report))})\n")
+    stub.chmod(stub.stat().st_mode | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
+    testcase.enterContext(_patch.dict(
+        _os.environ, {"PATH": str(emptybin), "GLTF_VALIDATOR_PATH": str(stub)}))

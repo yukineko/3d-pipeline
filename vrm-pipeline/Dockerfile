@@ -35,6 +35,15 @@ RUN wget -q "https://download.blender.org/release/Blender4.2/blender-4.2.0-linux
 
 ENV PATH="/opt/blender:${PATH}"
 
+# Install Khronos glTF-Validator 2.0.0-dev.3.10 (mandatory: render/vrm_validate.py
+# blocks every VRM when gltf_validator cannot be resolved on PATH)
+RUN wget -q "https://github.com/KhronosGroup/glTF-Validator/releases/download/2.0.0-dev.3.10/gltf_validator-2.0.0-dev.3.10-linux64.tar.xz" \
+        -O /tmp/gltf_validator.tar.xz \
+    && mkdir -p /tmp/gltf_validator \
+    && tar -xJf /tmp/gltf_validator.tar.xz -C /tmp/gltf_validator \
+    && install -m 0755 "$(find /tmp/gltf_validator -type f -name gltf_validator | head -n 1)" /usr/local/bin/gltf_validator \
+    && rm -rf /tmp/gltf_validator /tmp/gltf_validator.tar.xz
+
 # Install VRM Add-on for Blender 2.20.77
 RUN wget -q "https://github.com/saturday06/VRM-Addon-for-Blender/releases/download/2_20_77/VRM_Addon_for_Blender-2_20_77.zip" \
         -O /tmp/vrm_addon.zip \

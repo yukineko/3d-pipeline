@@ -27,7 +27,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import pipeline  # noqa: E402
-from glb_fixtures import minimal_glb_bytes  # noqa: E402
+from glb_fixtures import minimal_glb_bytes, install_clean_gltf_validator  # noqa: E402
 
 
 class TestValidateVrmGate(unittest.TestCase):
@@ -92,9 +92,10 @@ class TestValidateVrmGate(unittest.TestCase):
         bones = list(__import__("render.vrm_validate", fromlist=["x"])._REQUIRED_BONES_10)
         gltf = {
             "nodes": [{"name": f"n{i}"} for i in range(len(bones))],
-            "extensions": {"VRMC_vrm": {"humanoid": {
-                "humanBones": {b: {"node": i} for i, b in enumerate(bones)}
-            }}},
+            "extensions": {"VRMC_vrm": {
+                "humanoid": {"humanBones": {b: {"node": i} for i, b in enumerate(bones)}},
+                "meta": {"name": "Test", "authors": ["Tester"], "licenseUrl": ""},
+            }},
         }
         raw = json.dumps(gltf).encode("utf-8")
         raw += b" " * ((-len(raw)) % 4)
@@ -107,9 +108,8 @@ class TestValidateVrmGate(unittest.TestCase):
             vrm_path = output_dir / "model.vrm"
             vrm_path.write_bytes(blob)
 
-            # No GLTF_VALIDATOR_PATH → built-in checks only.
-            import os
-            os.environ.pop("GLTF_VALIDATOR_PATH", None)
+            # Validator is mandatory: resolve it to a clean stub (hermetic PATH).
+            install_clean_gltf_validator(self, d)
             report = pipeline._validate_vrm_gate(vrm_path, output_dir)
 
             self.assertTrue(report["ok"])

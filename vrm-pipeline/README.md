@@ -26,6 +26,31 @@ VRM 生成改善パイプライン — `prompt × 自分の傾向 × 結果評�
 - Blender 4.2.0 LTS + VRM Add-on for Blender 2.20.77
 - Rust 1.79+
 - Python 3.10+（render.py の依存ライブラリ用）
+- **Khronos glTF-Validator（必須）** — VRM を台帳に入れる前の品質ゲート
+  （`render/vrm_validate.py`）が必ず実行する。見つからない・起動できない・
+  タイムアウト・出力が読めない・`numErrors > 0` のいずれも **エラー**となり、
+  その VRM は台帳に登録されない（エラーメッセージに直し方が書かれる）。
+
+### Khronos glTF-Validator のインストール
+
+[リリースページ](https://github.com/KhronosGroup/glTF-Validator/releases) から
+OS に合うアーカイブ（例: `gltf_validator-2.0.0-dev.3.10-macos64.tar.xz` /
+`-linux64.tar.xz`）を取得し、中の `gltf_validator` を PATH の通った場所に置く。
+
+```bash
+tar -xJf gltf_validator-2.0.0-dev.3.10-macos64.tar.xz
+install -m 0755 gltf_validator ~/.local/bin/gltf_validator   # ~/.local/bin が PATH にあること
+```
+
+| 環境変数 | 意味 |
+|---|---|
+| `GLTF_VALIDATOR_PATH` | 実行ファイルを明示する（設定時は PATH より優先。存在しない・実行不可ならエラー） |
+| `GLTF_VALIDATOR_TIMEOUT_SECS` | 1 ファイルあたりのタイムアウト秒（既定 120）。不正値は既定値を使い、その旨を validation.json の warnings に記録する（タイムアウトは無効化できない） |
+
+VRM 1.0 の meta（`name` / `authors` / `licenseUrl`）が仕様を満たさない場合は
+**警告**として validation.json に記録されるだけで、台帳登録は妨げない。
+
+Docker イメージには同梱済み（下記）。
 
 ### Rust バイナリのビルド
 

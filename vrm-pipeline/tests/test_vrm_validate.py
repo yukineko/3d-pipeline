@@ -19,6 +19,10 @@ if str(PIPELINE_ROOT) not in sys.path:
 
 from render import vrm_validate  # noqa: E402
 
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from glb_fixtures import install_clean_gltf_validator  # noqa: E402
+
 _CHUNK_TYPE_JSON = 0x4E4F534A
 
 
@@ -62,7 +66,11 @@ def healthy_vrm_10() -> dict:
     human_bones = {b: {"node": i} for i, b in enumerate(bones)}
     return {
         "nodes": nodes,
-        "extensions": {"VRMC_vrm": {"humanoid": {"humanBones": human_bones}}},
+        "extensions": {"VRMC_vrm": {
+            "humanoid": {"humanBones": human_bones},
+            # spec-valid meta (VRMC_vrm.meta.schema.json required fields)
+            "meta": {"name": "Test", "authors": ["Tester"], "licenseUrl": ""},
+        }},
     }
 
 
@@ -158,6 +166,7 @@ class TestTpose(unittest.TestCase):
 class TestValidateVrm(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        install_clean_gltf_validator(self, self.tmp)  # validator is mandatory
 
     def test_healthy_is_ok(self):
         p = write_glb(self.tmp / "ok.vrm", healthy_vrm_0x())
@@ -181,21 +190,21 @@ class TestValidateVrm(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertTrue(report["warnings"])
 
-    def test_validator_absent_does_not_raise(self):
-        # No GLTF_VALIDATOR_PATH and (assumed) no gltf_validator on PATH:
-        # run_gltf_validator returns None and validate_vrm still succeeds.
+    def test_validator_absent_is_error(self):
+        # Ruling A: the Khronos validator is mandatory.  With no
+        # GLTF_VALIDATOR_PATH and nothing on PATH the report must be an error.
         import os
-        os.environ.pop("GLTF_VALIDATOR_PATH", None)
-        self.assertIsNone(vrm_validate.run_gltf_validator(self.tmp / "missing.vrm")
-                          if not os.environ.get("GLTF_VALIDATOR_PATH") else {})
+        os.environ.pop("GLTF_VALIDATOR_PATH", None)  # restored by install_clean_gltf_validator cleanup
         p = write_glb(self.tmp / "ok2.vrm", healthy_vrm_10())
         report = vrm_validate.validate_vrm(p)
-        self.assertTrue(report["ok"])
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("validator" in e.lower() for e in report["errors"]), report["errors"])
 
 
 class TestAssertValidVrm(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        install_clean_gltf_validator(self, self.tmp)  # validator is mandatory
 
     def test_writes_report_and_returns_on_success(self):
         p = write_glb(self.tmp / "ok.vrm", healthy_vrm_10())
