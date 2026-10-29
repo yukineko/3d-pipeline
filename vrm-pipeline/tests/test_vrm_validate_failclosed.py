@@ -4,7 +4,8 @@ Fail-closed tests for render.vrm_validate (rulings A and B).
 A. The Khronos glTF-Validator is MANDATORY.  Unresolvable binary, crash, abnormal
    exit, timeout, unparseable output, or numErrors > 0 must all resolve to an
    ERROR (cannot determine => block), never a silent pass.
-B. VRM meta follows the SPEC exactly.  VRM 1.0 (VRMC_vrm.meta.schema.json,
+B. VRM meta is a release concern: it WARNS, never blocks (ok stays True).
+   Field coverage follows the SPEC.  VRM 1.0 (VRMC_vrm.meta.schema.json,
    required name/authors/licenseUrl): name = string minLength 1; authors =
    array minItems 1 of strings minLength 1; licenseUrl = string (empty allowed).
    Meta object required (VRMC_vrm.schema.json required: specVersion, meta,
@@ -189,8 +190,19 @@ class TestMetaV10(_Hermetic):
         super().setUp()
         self.clean_stub()  # isolate: any error must come from meta
 
+    # Policy: VRM meta is a release/publishing concern.  Missing or malformed
+    # meta WARNS (named field in `warnings`) and never blocks (`errors` empty,
+    # ok stays True).  The clean validator stub guarantees nothing else errs.
+    def assert_warned(self, report, *needles):
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["errors"], [], report)
+        blob = " | ".join(report["warnings"]).lower()
+        self.assertTrue(report["warnings"], report)
+        for n in needles:
+            self.assertIn(n.lower(), blob, f"{n!r} not named in warnings: {report['warnings']}")
+
     def _check(self, gltf, field):
-        self.assert_blocked(vrm_validate.validate_vrm(self.vrm(gltf)), field)
+        self.assert_warned(vrm_validate.validate_vrm(self.vrm(gltf)), field)
 
     def test_complete_meta_no_error(self):
         report = vrm_validate.validate_vrm(self.vrm(with_meta_10()))
@@ -208,8 +220,8 @@ class TestMetaV10(_Hermetic):
     def test_meta_empty_object_names_all_fields(self):
         gltf = healthy_vrm_10()
         gltf["extensions"]["VRMC_vrm"]["meta"] = {}
-        self.assert_blocked(vrm_validate.validate_vrm(self.vrm(gltf)),
-                            "name", "authors", "licenseUrl")
+        self.assert_warned(vrm_validate.validate_vrm(self.vrm(gltf)),
+                           "name", "authors", "licenseUrl")
 
     def test_name_missing(self):
         gltf = with_meta_10()
@@ -269,6 +281,7 @@ class TestMetaV0x(_Hermetic):
         report = vrm_validate.validate_vrm(self.vrm(healthy_vrm_0x()))
         self.assertTrue(report["ok"], report)
         self.assertEqual(report["errors"], [])
+        self.assertEqual(report["warnings"], [])
 
     def test_meta_empty_object_no_meta_error(self):
         gltf = healthy_vrm_0x()
@@ -276,6 +289,7 @@ class TestMetaV0x(_Hermetic):
         report = vrm_validate.validate_vrm(self.vrm(gltf))
         self.assertTrue(report["ok"], report)
         self.assertEqual(report["errors"], [])
+        self.assertEqual(report["warnings"], [])
 
 
 class TestPipelineGateFailClosed(_Hermetic):
@@ -300,14 +314,18 @@ class TestPipelineGateFailClosed(_Hermetic):
         self.assertTrue(vj.exists())
         self.assertFalse(json.loads(vj.read_text())["ok"])
 
-    def test_missing_meta_not_admitted_even_with_clean_validator(self):
+    def test_missing_meta_admitted_with_warning(self):
+        # Meta is a release concern: admitted, warning recorded in validation.json.
         self.clean_stub()
         out = self.tmp / "out"
         out.mkdir()
         vrm_path = self.vrm(healthy_vrm_10(), "model.vrm")  # no meta
-        with self.assertRaises(RuntimeError) as cm:
-            pipeline._validate_vrm_gate(vrm_path, out)
-        self.assertIn("meta", str(cm.exception).lower())
+        report = pipeline._validate_vrm_gate(vrm_path, out)
+        self.assertTrue(report["ok"], report)
+        vj = json.loads((out / "validation.json").read_text())
+        self.assertTrue(vj["ok"], vj)
+        self.assertEqual(vj["errors"], [])
+        self.assertIn("meta", " | ".join(vj["warnings"]).lower())
 
     def test_complete_asset_with_clean_validator_admitted(self):
         self.clean_stub()
