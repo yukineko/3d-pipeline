@@ -1,0 +1,18 @@
+# tdd — test-first ゲート（harness の tdd プラグインが読む）。
+# 実装コードを足したのにテストが見えないとき、Stop を block する。
+# `tdd red` / `tdd green` / `tdd oracle` で RED→GREEN の証跡を残す。
+
+enabled = true
+max_attempts = 3
+reset_after_secs = 600
+min_added_impl_lines = 1
+
+# `tdd red` / `tdd green` の既定コマンド（--cmd で個別に上書きできる）。
+test_cmd = "cd vrm-pipeline && python3 -m unittest discover -s tests"
+proof_dir = ".tdd"
+
+# テストを書く agent と実装する agent を分ける（red と green の --author が同じなら拒否）。
+strict_separation = true
+
+impl_globs = ["**/*.py", "**/*.rs", "**/*.swift"]
+test_path_globs = ["**/tests/**", "**/Tests/**", "**/test_*.py"]
