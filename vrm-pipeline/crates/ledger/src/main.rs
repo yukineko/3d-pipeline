@@ -219,13 +219,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     if matches!(cli.command, Commands::Check)
         && cli.db.is_none()
-        && std::env::var_os("HOME").is_none()
+        && std::env::var_os("HOME").is_none_or(|h| h.is_empty())
     {
         // Without HOME the default path would fall back to /tmp and check a
         // ledger that is not the user's; with the missing-DB warning that
         // would silently pass. Refuse to guess.
         eprintln!(
-            "ledger check: cannot determine: HOME is not set, so the default ledger path is unknown; pass --db <path>"
+            "ledger check: cannot determine: HOME is unset or empty, so the default ledger path is unknown; pass --db <path>"
         );
         std::process::exit(check::EXIT_UNDETERMINED);
     }

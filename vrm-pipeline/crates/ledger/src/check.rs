@@ -2,6 +2,9 @@
 //!
 //! Exit codes:
 //! - 0: clean — every rule was evaluated on every record and none was violated.
+//!   Also 0 when nothing exists at the DB path (the ledger has not been created
+//!   yet): a stderr warning names the path. An unknowable path (unreadable
+//!   parent, dangling symlink, unset/empty HOME without --db) is exit 2.
 //! - 1: violations — one stdout line per violation, naming the record id and
 //!   the rule (`parent-missing`, `lineage-cycle`, `asset-missing`).
 //! - 2: cannot determine — the DB could not be opened/read, the schema lacks a
