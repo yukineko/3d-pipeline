@@ -4,10 +4,11 @@ Fail-closed tests for render.vrm_validate (rulings A and B).
 A. The Khronos glTF-Validator is MANDATORY.  Unresolvable binary, crash, abnormal
    exit, timeout, unparseable output, or numErrors > 0 must all resolve to an
    ERROR (cannot determine => block), never a silent pass.
-B. Required VRM meta.  VRM 1.0 (VRMC_vrm.meta): name (non-empty str), authors
-   (non-empty list of non-empty str), licenseUrl (non-empty str).  VRM 0.x
-   (VRM.meta): title, author, licenseName (non-empty str).  Missing / empty /
-   wrong-typed / absent meta => ERROR naming the field.
+B. VRM meta follows the SPEC exactly.  VRM 1.0 (VRMC_vrm.meta.schema.json,
+   required name/authors/licenseUrl): name = string minLength 1; authors =
+   array minItems 1 of strings minLength 1; licenseUrl = string (empty allowed).
+   Meta object required (VRMC_vrm.schema.json required: specVersion, meta,
+   humanoid).  VRM 0.x has no required meta: no meta checks.
 
 Hermetic: the validator is a stub script injected via GLTF_VALIDATOR_PATH and
 PATH is pointed at an empty directory so a real installed gltf_validator is
@@ -243,52 +244,38 @@ class TestMetaV10(_Hermetic):
         del gltf["extensions"]["VRMC_vrm"]["meta"]["licenseUrl"]
         self._check(gltf, "licenseUrl")
 
-    def test_license_url_empty(self):
-        self._check(with_meta_10(licenseUrl=""), "licenseUrl")
+    def test_license_url_empty_string_allowed(self):
+        # Schema: licenseUrl is {"type": "string"} with no minLength.
+        report = vrm_validate.validate_vrm(self.vrm(with_meta_10(licenseUrl="")))
+        self.assertTrue(report["ok"], report)
 
     def test_license_url_wrong_type(self):
         self._check(with_meta_10(licenseUrl=["https://x"]), "licenseUrl")
 
 
 class TestMetaV0x(_Hermetic):
+    """Spec (0.0 vrm.meta.schema.json) has no required meta: no meta errors."""
+
     def setUp(self):
         super().setUp()
         self.clean_stub()
-
-    def _check(self, gltf, field):
-        self.assert_blocked(vrm_validate.validate_vrm(self.vrm(gltf)), field)
 
     def test_complete_meta_no_error(self):
         report = vrm_validate.validate_vrm(self.vrm(with_meta_0x()))
         self.assertTrue(report["ok"], report)
         self.assertEqual(report["version"], "0.x")
 
-    def test_meta_object_absent(self):
-        self._check(healthy_vrm_0x(), "meta")
+    def test_meta_absent_no_meta_error(self):
+        report = vrm_validate.validate_vrm(self.vrm(healthy_vrm_0x()))
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["errors"], [])
 
-    def test_meta_not_an_object(self):
-        gltf = healthy_vrm_0x()
-        gltf["extensions"]["VRM"]["meta"] = []
-        self._check(gltf, "meta")
-
-    def test_meta_empty_object_names_all_fields(self):
+    def test_meta_empty_object_no_meta_error(self):
         gltf = healthy_vrm_0x()
         gltf["extensions"]["VRM"]["meta"] = {}
-        self.assert_blocked(vrm_validate.validate_vrm(self.vrm(gltf)),
-                            "title", "author", "licenseName")
-
-    def test_each_required_field_missing_empty_or_wrong_type(self):
-        for field in ("title", "author", "licenseName"):
-            missing = with_meta_0x()
-            del missing["extensions"]["VRM"]["meta"][field]
-            for label, gltf in (
-                ("missing", missing),
-                ("empty", with_meta_0x(**{field: ""})),
-                ("int", with_meta_0x(**{field: 7})),
-                ("list", with_meta_0x(**{field: ["x"]})),
-            ):
-                with self.subTest(field=field, case=label):
-                    self._check(gltf, field)
+        report = vrm_validate.validate_vrm(self.vrm(gltf))
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["errors"], [])
 
 
 class TestPipelineGateFailClosed(_Hermetic):
