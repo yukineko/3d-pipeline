@@ -352,6 +352,8 @@ def run_gltf_validator(path: str | Path) -> dict:
             num = candidate.get("numErrors")
             if not isinstance(num, int) or isinstance(num, bool):
                 parse_problem = "its report has no integer 'issues.numErrors'"
+            elif num < 0:
+                parse_problem = f"its report has a negative 'issues.numErrors' ({num})"
             else:
                 issues = candidate
     result["issues"] = issues
