@@ -25,3 +25,8 @@ name = "viewer-tests"
 cmd = "viewer/LedgerViewer/Tests/run-fixture.sh"
 when_changed = ["viewer/**", "vrm-pipeline/crates/ledger/**"]
 timeout_secs = 540
+
+[[check]]
+name = "ledger-integrity"
+cmd = "cargo run --quiet --manifest-path vrm-pipeline/Cargo.toml -p ledger -- check"
+timeout_secs = 300
