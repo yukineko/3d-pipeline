@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use uuid::Uuid;
 
 use crate::schema::{
-    CREATE_TABLE_SQL, MIGRATE_V2_SQL, MIGRATE_V3_SQL, MIGRATE_V4_SQL, MIGRATE_V5_SQL, Record,
+    Record, CREATE_TABLE_SQL, MIGRATE_V2_SQL, MIGRATE_V3_SQL, MIGRATE_V4_SQL, MIGRATE_V5_SQL,
 };
 
 /// Apply the idempotent schema migrations to an open connection.
@@ -199,10 +199,14 @@ fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<Record> {
         r1_ref: row.get(5)?,
         outcome: row.get(6)?,
         asset_ref: row.get(7)?,
-        derived: row.get::<_, Option<String>>(8)?.unwrap_or_else(|| "{}".to_string()),
+        derived: row
+            .get::<_, Option<String>>(8)?
+            .unwrap_or_else(|| "{}".to_string()),
         parent_id: row.get(9)?,
         image_ref: row.get(10)?,
-        status: row.get::<_, Option<String>>(11)?.unwrap_or_else(|| "done".to_string()),
+        status: row
+            .get::<_, Option<String>>(11)?
+            .unwrap_or_else(|| "done".to_string()),
     })
 }
 
@@ -266,8 +270,7 @@ pub fn set_derived_key(
         .with_context(|| format!("record not found: {id}"))?
         .unwrap_or_else(|| "{}".to_string());
 
-    let mut obj: serde_json::Value =
-        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+    let mut obj: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
     obj[key] = value.clone();
     let updated = serde_json::to_string(&obj).context("serialize derived")?;
 
@@ -313,11 +316,12 @@ pub fn all_embeddings(db_path: &std::path::Path) -> Result<Vec<EmbeddingRow>> {
 
 pub fn set_r1_ref(db_path: &std::path::Path, id: &str, r1_ref: &str) -> Result<()> {
     let conn = open(db_path)?;
-    let affected = conn.execute(
-        "UPDATE records SET r1_ref = ?1 WHERE id = ?2",
-        params![r1_ref, id],
-    )
-    .context("failed to set r1_ref")?;
+    let affected = conn
+        .execute(
+            "UPDATE records SET r1_ref = ?1 WHERE id = ?2",
+            params![r1_ref, id],
+        )
+        .context("failed to set r1_ref")?;
     if affected == 0 {
         anyhow::bail!("record not found: {id}");
     }
@@ -328,11 +332,12 @@ pub fn set_r1_ref(db_path: &std::path::Path, id: &str, r1_ref: &str) -> Result<(
 /// capture be attached to a record created without renders (e.g. a VRoid import).
 pub fn set_r0_ref(db_path: &std::path::Path, id: &str, r0_ref: &str) -> Result<()> {
     let conn = open(db_path)?;
-    let affected = conn.execute(
-        "UPDATE records SET r0_ref = ?1 WHERE id = ?2",
-        params![r0_ref, id],
-    )
-    .context("failed to set r0_ref")?;
+    let affected = conn
+        .execute(
+            "UPDATE records SET r0_ref = ?1 WHERE id = ?2",
+            params![r0_ref, id],
+        )
+        .context("failed to set r0_ref")?;
     if affected == 0 {
         anyhow::bail!("record not found: {id}");
     }
@@ -360,7 +365,11 @@ pub fn get_embedding(db_path: &std::path::Path, id: &str) -> Result<Option<Vec<f
     Ok(None)
 }
 
-pub fn update_outcome_embed(db_path: &std::path::Path, id: &str, edit_dist_embed: f64) -> Result<()> {
+pub fn update_outcome_embed(
+    db_path: &std::path::Path,
+    id: &str,
+    edit_dist_embed: f64,
+) -> Result<()> {
     let conn = open(db_path)?;
     let outcome: String = conn
         .query_row(
@@ -383,7 +392,11 @@ pub fn update_outcome_embed(db_path: &std::path::Path, id: &str, edit_dist_embed
     Ok(())
 }
 
-pub fn update_outcome_phash(db_path: &std::path::Path, id: &str, edit_dist_phash: f64) -> Result<()> {
+pub fn update_outcome_phash(
+    db_path: &std::path::Path,
+    id: &str,
+    edit_dist_phash: f64,
+) -> Result<()> {
     let conn = open(db_path)?;
     let outcome: String = conn
         .query_row(
@@ -439,7 +452,11 @@ pub fn stats(db_path: &std::path::Path) -> Result<Stats> {
     let mut edit_dists: Vec<f64> = Vec::new();
     for outcome_str in &outcomes {
         if let Ok(obj) = serde_json::from_str::<serde_json::Value>(outcome_str) {
-            if obj.get("adopted").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if obj
+                .get("adopted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 adopted += 1;
             }
             if let Some(ed) = obj.get("edit_dist_phash").and_then(|v| v.as_f64()) {
@@ -547,8 +564,7 @@ mod tests {
 
         let records = list_records(&db_path, 10).unwrap();
         assert_eq!(records.len(), 1);
-        let outcome: serde_json::Value =
-            serde_json::from_str(&records[0].outcome).unwrap();
+        let outcome: serde_json::Value = serde_json::from_str(&records[0].outcome).unwrap();
         assert_eq!(outcome["adopted"], serde_json::Value::Bool(true));
     }
 

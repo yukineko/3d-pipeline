@@ -47,7 +47,10 @@ mod tests {
     use super::*;
 
     fn row(id: &str, v: Vec<f64>) -> EmbeddingRow {
-        EmbeddingRow { id: id.to_string(), vec: v }
+        EmbeddingRow {
+            id: id.to_string(),
+            vec: v,
+        }
     }
 
     #[test]
@@ -73,7 +76,7 @@ mod tests {
         let q = vec![1.0, 0.0, 0.0];
         let rows = vec![
             row("close", vec![0.9, 0.1, 0.0]),
-            row("far",   vec![0.1, 0.9, 0.0]),
+            row("far", vec![0.1, 0.9, 0.0]),
             row("exact", vec![1.0, 0.0, 0.0]),
         ];
         let r = top_k_similar(&q, &rows, 3);
@@ -85,10 +88,7 @@ mod tests {
     #[test]
     fn dimension_mismatch_skipped() {
         let q = vec![1.0, 0.0];
-        let rows = vec![
-            row("ok",  vec![1.0, 0.0]),
-            row("bad", vec![1.0, 0.0, 0.0]),
-        ];
+        let rows = vec![row("ok", vec![1.0, 0.0]), row("bad", vec![1.0, 0.0, 0.0])];
         let r = top_k_similar(&q, &rows, 5);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].id, "ok");
@@ -111,9 +111,18 @@ mod tests {
         // total order instead. Finite scores must still sort highest-first and
         // every input element is preserved.
         let mut results = vec![
-            SimilarResult { id: "nan".into(), score: f64::NAN },
-            SimilarResult { id: "low".into(), score: 0.1 },
-            SimilarResult { id: "high".into(), score: 0.9 },
+            SimilarResult {
+                id: "nan".into(),
+                score: f64::NAN,
+            },
+            SimilarResult {
+                id: "low".into(),
+                score: 0.1,
+            },
+            SimilarResult {
+                id: "high".into(),
+                score: 0.9,
+            },
         ];
         sort_by_score_desc(&mut results); // must not panic
         assert_eq!(results.len(), 3);
