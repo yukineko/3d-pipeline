@@ -249,8 +249,10 @@ def _validate_vrm_gate(vrm_path: Path, output_dir: Path) -> dict:
     returns the report dict on success.  Raises ``RuntimeError`` — blocking the
     ledger insert — when validation finds *errors* (no VRM extension, a missing
     required humanoid bone, a dangling bone node, glTF-Validator structural
-    errors).  T-pose deviations are recorded as warnings and do not block,
-    since ``height_scale`` edits legitimately perturb the rig.
+    errors, or a mandatory glTF-Validator that could not be run / read).
+    T-pose deviations and VRM 1.0 meta spec violations are recorded as
+    warnings and do not block, since ``height_scale`` edits legitimately
+    perturb the rig and meta is a release concern.
     """
     from render.vrm_validate import assert_valid_vrm  # lazy: keep module import light
 

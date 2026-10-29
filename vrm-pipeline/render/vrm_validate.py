@@ -23,19 +23,32 @@ Design constraints:
   a non-identity scale into the armature, so a strict T-pose==identity check
   would reject legitimately-edited avatars.  Warnings are recorded in the
   validation report but never raise.
-* **Degraded offline mode.**  The external Khronos glTF-Validator is used when
-  available (``GLTF_VALIDATOR_PATH`` or ``gltf_validator`` on PATH) but is
-  entirely optional — when absent the built-in structural + humanoid checks
-  still run, so the gate works in CI/offline.
+* **The Khronos glTF-Validator is mandatory.**  It is resolved from
+  ``GLTF_VALIDATOR_PATH`` then ``gltf_validator`` on PATH.  "Could not run it"
+  is never "it passed": an unresolvable / non-executable binary, a crash or
+  non-zero exit, a timeout, and an unparseable or structurally wrong report all
+  become *errors* (cannot determine => block), as does ``numErrors > 0``.  The
+  timeout defaults to ``_DEFAULT_VALIDATOR_TIMEOUT_SECS`` and is overridable via
+  ``GLTF_VALIDATOR_TIMEOUT_SECS``; an invalid override falls back to the default
+  (recorded as a warning) and never disables the timeout.
+* **VRM 1.0 meta per spec, as warnings.**  ``VRMC_vrm.schema.json`` requires
+  ``meta``; the meta schema requires ``name`` (string, minLength 1),
+  ``authors`` (array, minItems 1, of strings minLength 1) and ``licenseUrl``
+  (string, empty allowed).  Meta is release/publishing information, not asset
+  integrity, so violations are recorded as *warnings* and do not block.  VRM
+  0.x has no required meta: not checked.
+* Every error/warning message says what is wrong *and* how to fix it.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import math
 import shutil
 import struct
 import subprocess
+import tempfile
 from pathlib import Path
 
 # GLB container constants (little-endian).  Header: magic(u32) version(u32)
@@ -65,6 +78,17 @@ _REQUIRED_LIMB_BONES = (
 _REQUIRED_COMMON_BONES = ("hips", "spine", "head", *_REQUIRED_LIMB_BONES)  # 15
 _REQUIRED_BONES_0X = (*_REQUIRED_COMMON_BONES, "chest", "neck")          # 17
 _REQUIRED_BONES_10 = _REQUIRED_COMMON_BONES                              # 15
+
+# Khronos glTF-Validator resolution / timeout.
+_VALIDATOR_ENV = "GLTF_VALIDATOR_PATH"
+_VALIDATOR_BIN = "gltf_validator"
+_VALIDATOR_TIMEOUT_ENV = "GLTF_VALIDATOR_TIMEOUT_SECS"
+_DEFAULT_VALIDATOR_TIMEOUT_SECS = 120.0
+_VALIDATOR_INSTALL_HINT = (
+    "install Khronos gltf_validator "
+    "(https://github.com/KhronosGroup/glTF-Validator/releases) on PATH "
+    f"or set {_VALIDATOR_ENV} to its executable"
+)
 
 
 def _read_glb_json(path: str | Path) -> dict:
@@ -212,33 +236,218 @@ def check_tpose(gltf: dict, version: str | None) -> list:
     return warnings
 
 
-def run_gltf_validator(path: str | Path) -> dict | None:
+def _validator_timeout() -> tuple:
     """
-    Run the Khronos glTF-Validator on *path* and return its ``issues`` dict,
-    or ``None`` when the binary cannot be resolved or the run fails.
+    Return ``(timeout_secs, warning_or_None)``.
 
-    The binary is resolved from ``GLTF_VALIDATOR_PATH`` then ``gltf_validator``
-    on PATH.  Any failure (missing binary, timeout, non-JSON output) degrades
-    to ``None`` rather than raising — the built-in checks still gate.
+    ``GLTF_VALIDATOR_TIMEOUT_SECS`` overrides the default when it is a finite
+    positive number.  Anything else falls back to the default and yields a
+    warning — the timeout is never disabled.
     """
-    binary = os.environ.get("GLTF_VALIDATOR_PATH") or shutil.which("gltf_validator")
-    if not binary:
-        return None
+    raw = os.environ.get(_VALIDATOR_TIMEOUT_ENV)
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_VALIDATOR_TIMEOUT_SECS, None
     try:
-        proc = subprocess.run(
-            [binary, "-o", str(path)],
-            capture_output=True,
-            text=True,
-            timeout=120,
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not math.isfinite(value) or value <= 0:
+        return _DEFAULT_VALIDATOR_TIMEOUT_SECS, (
+            f"{_VALIDATOR_TIMEOUT_ENV}={raw!r} is not a positive number of "
+            f"seconds; using the default {_DEFAULT_VALIDATOR_TIMEOUT_SECS:g}s "
+            f"(fix: set it to e.g. 300, or unset it)"
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    return value, None
+
+
+def _resolve_validator() -> tuple:
+    """Return ``(binary_path, None)`` or ``(None, error_message)``."""
+    configured = os.environ.get(_VALIDATOR_ENV)
+    if configured:
+        if not os.path.isfile(configured):
+            return None, (
+                f"glTF-Validator not found: {_VALIDATOR_ENV}={configured!r} does "
+                f"not exist or is not a file (fix: point {_VALIDATOR_ENV} at the "
+                f"gltf_validator executable, or unset it and {_VALIDATOR_INSTALL_HINT})"
+            )
+        if not os.access(configured, os.X_OK):
+            return None, (
+                f"glTF-Validator not executable: {_VALIDATOR_ENV}={configured!r} "
+                f"(fix: chmod +x {configured!r}, or {_VALIDATOR_INSTALL_HINT})"
+            )
+        return configured, None
+    found = shutil.which(_VALIDATOR_BIN)
+    if not found:
+        return None, (
+            f"glTF-Validator is required but was not found ({_VALIDATOR_ENV} "
+            f"unset and no {_VALIDATOR_BIN!r} on PATH) (fix: {_VALIDATOR_INSTALL_HINT})"
+        )
+    return found, None
+
+
+def run_gltf_validator(path: str | Path) -> dict:
+    """
+    Run the Khronos glTF-Validator on *path*.  Never raises.
+
+    Returns ``{"issues": dict | None, "error": str | None, "warnings": [str]}``.
+    ``error`` is set whenever the validator could not deliver a trustworthy
+    verdict (unresolvable/non-executable binary, OSError on launch, timeout,
+    non-zero exit, unparseable or structurally wrong report) *or* reported
+    ``numErrors > 0``.  ``issues`` is the parsed ``issues`` dict when one was
+    obtained.  ``error is None`` is the only "validator passed" outcome.
+    """
+    result: dict = {"issues": None, "error": None, "warnings": []}
+    binary, err = _resolve_validator()
+    if err:
+        result["error"] = err
+        return result
+
+    timeout, timeout_warning = _validator_timeout()
+    if timeout_warning:
+        result["warnings"].append(timeout_warning)
+
     try:
-        report = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    issues = report.get("issues")
-    return issues if isinstance(issues, dict) else None
+        # The Khronos validator picks the loader from the file extension and
+        # refuses ``.vrm`` ("unknown file extension", exit 1).  A VRM is a GLB,
+        # so hand it a ``.glb``-named symlink in a private temp dir — nothing
+        # is written next to the asset.
+        with tempfile.TemporaryDirectory(prefix="vrm_validate_") as tmp:
+            target = Path(path)
+            if target.suffix.lower() not in (".glb", ".gltf"):
+                alias = Path(tmp) / "model.glb"
+                alias.symlink_to(target.resolve())
+                target = alias
+            proc = subprocess.run(
+                [binary, "-o", str(target)],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+    except subprocess.TimeoutExpired:
+        result["error"] = (
+            f"glTF-Validator timed out after {timeout:g}s on {path} "
+            f"(fix: raise {_VALIDATOR_TIMEOUT_ENV}, e.g. "
+            f"{_VALIDATOR_TIMEOUT_ENV}={max(int(timeout * 2), 240)})"
+        )
+        return result
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        result["error"] = (
+            f"glTF-Validator could not be run ({binary!r}: {exc}) "
+            f"(fix: check that it is a working executable, or {_VALIDATOR_INSTALL_HINT})"
+        )
+        return result
+
+    stderr_tail = (proc.stderr or "").strip()[-300:]
+    issues = None
+    parse_problem = None
+    try:
+        report = json.loads(proc.stdout or "")
+    except (json.JSONDecodeError, ValueError, TypeError):
+        parse_problem = "its output is not JSON"
+    else:
+        candidate = report.get("issues") if isinstance(report, dict) else None
+        if not isinstance(candidate, dict):
+            parse_problem = "its JSON report has no 'issues' object"
+        else:
+            num = candidate.get("numErrors")
+            if not isinstance(num, int) or isinstance(num, bool):
+                parse_problem = "its report has no integer 'issues.numErrors'"
+            else:
+                issues = candidate
+    result["issues"] = issues
+
+    if issues is not None and issues["numErrors"] > 0:
+        result["error"] = (
+            f"glTF-Validator reported {issues['numErrors']} structural error(s) "
+            f"in {path} (fix: run `{_VALIDATOR_BIN} {path}` to see them and "
+            f"repair the export/edit step that produced them)"
+        )
+        return result
+    if proc.returncode != 0:
+        detail = f"; stderr: {stderr_tail}" if stderr_tail else ""
+        result["error"] = (
+            f"glTF-Validator exited with status {proc.returncode} on {path}, "
+            f"so its verdict cannot be trusted{detail} (fix: run "
+            f"`{_VALIDATOR_BIN} -o {path}` by hand; reinstall it if it crashes — "
+            f"{_VALIDATOR_INSTALL_HINT})"
+        )
+        return result
+    if parse_problem:
+        result["error"] = (
+            f"glTF-Validator output could not be read: {parse_problem} "
+            f"(fix: make sure {_VALIDATOR_ENV}/PATH points at the Khronos "
+            f"gltf_validator, which prints a JSON report with -o; "
+            f"{_VALIDATOR_INSTALL_HINT})"
+        )
+        return result
+    return result
+
+
+def check_meta(gltf: dict, version: str | None) -> list:
+    """
+    Return *warning* strings for VRM meta spec violations.
+
+    VRM 1.0 (``VRMC_vrm.schema.json`` requires ``meta``;
+    ``VRMC_vrm.meta.schema.json`` requires ``name``/``authors``/``licenseUrl``):
+    name = string minLength 1; authors = array minItems 1 of strings
+    minLength 1; licenseUrl = string (empty allowed).  Meta is publishing
+    information, not asset integrity, so these are warnings, never errors.
+    VRM 0.x has no required meta, so nothing is checked.
+    """
+    if version != "1.0":
+        return []
+    vrmc = (gltf.get("extensions") or {}).get("VRMC_vrm")
+    vrmc = vrmc if isinstance(vrmc, dict) else {}
+    fix = "set it in the VRM exporter's Meta panel (VRM 1.0 spec, VRMC_vrm.meta)"
+    if "meta" not in vrmc:
+        return [
+            "VRM 1.0 meta is missing (extensions.VRMC_vrm.meta is required with "
+            f"name, authors, licenseUrl) (fix: {fix})"
+        ]
+    meta = vrmc["meta"]
+    if not isinstance(meta, dict):
+        return [
+            f"VRM 1.0 meta must be an object with name, authors, licenseUrl, "
+            f"got {type(meta).__name__} (fix: {fix})"
+        ]
+
+    problems: list = []
+    name = meta.get("name")
+    if "name" not in meta:
+        problems.append(f"VRM 1.0 meta.name is missing (fix: {fix} — a non-empty avatar name)")
+    elif not isinstance(name, str) or name == "":
+        problems.append(
+            f"VRM 1.0 meta.name must be a non-empty string, got {name!r} "
+            f"(fix: {fix} — a non-empty avatar name)"
+        )
+
+    authors = meta.get("authors")
+    if "authors" not in meta:
+        problems.append(f"VRM 1.0 meta.authors is missing (fix: {fix} — at least one author)")
+    elif not isinstance(authors, list) or not authors:
+        problems.append(
+            f"VRM 1.0 meta.authors must be a non-empty array of strings, got "
+            f"{authors!r} (fix: {fix} — at least one author)"
+        )
+    else:
+        bad = [a for a in authors if not isinstance(a, str) or a == ""]
+        if bad:
+            problems.append(
+                f"VRM 1.0 meta.authors entries must be non-empty strings, got "
+                f"{bad!r} (fix: {fix} — remove or fill in the empty/invalid authors)"
+            )
+
+    if "licenseUrl" not in meta:
+        problems.append(
+            f"VRM 1.0 meta.licenseUrl is missing (fix: {fix} — a license URL "
+            f"string; an empty string is allowed)"
+        )
+    elif not isinstance(meta["licenseUrl"], str):
+        problems.append(
+            f"VRM 1.0 meta.licenseUrl must be a string, got {meta['licenseUrl']!r} "
+            f"(fix: {fix} — a license URL string; an empty string is allowed)"
+        )
+    return problems
 
 
 def validate_vrm(path: str | Path) -> dict:
@@ -256,7 +465,9 @@ def validate_vrm(path: str | Path) -> dict:
         }
 
     A VRM with no VRM extension, a missing required humanoid bone, an
-    out-of-range bone node, or glTF-Validator structural errors is *not* ok.
+    out-of-range bone node, glTF-Validator structural errors, or a
+    glTF-Validator that could not be run / read is *not* ok.  VRM 1.0 meta
+    spec violations are warnings only.
     """
     errors: list = []
     warnings: list = []
@@ -281,12 +492,13 @@ def validate_vrm(path: str | Path) -> dict:
     else:
         errors.extend(check_humanoid_completeness(gltf, version))
         warnings.extend(check_tpose(gltf, version))
+        warnings.extend(check_meta(gltf, version))
 
-    validator_issues = run_gltf_validator(path)
-    if validator_issues is not None:
-        num_errors = validator_issues.get("numErrors", 0) or 0
-        if num_errors > 0:
-            errors.append(f"glTF-Validator reported {num_errors} structural error(s)")
+    validator = run_gltf_validator(path)
+    validator_issues = validator["issues"]
+    warnings.extend(validator["warnings"])
+    if validator["error"]:
+        errors.append(validator["error"])
 
     return {
         "path": str(path),
