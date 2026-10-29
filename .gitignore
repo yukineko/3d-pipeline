@@ -8,3 +8,6 @@ build/
 **/xcuserdata/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 .DS_Store
+
+# tdd の RED/GREEN 証跡（ローカルのみ）
+.tdd/

@@ -1,0 +1,27 @@
+# donegate — Stop 時の完了ゲート（harness の donegate プラグインが読む）。
+# 必須チェックがすべて exit 0 になるまで、エージェントは停止できない。
+# 変更したファイルに合うチェックだけが走る（when_changed）。
+# このファイルは `donegate trust` で信頼されるまで実行されず、停止は block される。
+
+enabled = true
+max_attempts = 3
+default_timeout_secs = 300
+output_tail_lines = 40
+
+[[check]]
+name = "python-tests"
+cmd = "cd vrm-pipeline && python3 -m unittest discover -s tests"
+when_changed = ["vrm-pipeline/**/*.py"]
+timeout_secs = 300
+
+[[check]]
+name = "rust-tests"
+cmd = "cargo test --workspace --quiet --manifest-path vrm-pipeline/Cargo.toml"
+when_changed = ["vrm-pipeline/crates/**", "vrm-pipeline/Cargo.toml", "vrm-pipeline/Cargo.lock"]
+timeout_secs = 540
+
+[[check]]
+name = "viewer-tests"
+cmd = "viewer/LedgerViewer/Tests/run-fixture.sh"
+when_changed = ["viewer/**", "vrm-pipeline/crates/ledger/**"]
+timeout_secs = 540
