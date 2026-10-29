@@ -402,3 +402,77 @@ fn undetermined_check_does_not_modify_db() {
     assert_undetermined_names(&db, &id, "undetermined readonly");
     assert_eq!(snapshot(&db), before);
 }
+
+// ---- round 2: duplicate JSON keys (fail-open) and non-UTF8 TEXT (panic) ----
+
+fn assert_no_panic(o: &Output, ctx: &str) {
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!err.contains("panicked"), "{ctx}: check panicked: {err}");
+}
+
+#[test]
+fn r3_duplicate_key_earlier_missing_path_is_undetermined_exit_2() {
+    let (d, db) = new_db();
+    let f = d.path().join("ok.glb");
+    std::fs::write(&f, b"x").unwrap();
+    let id = insert(&db, None, None);
+    set_asset_ref(
+        &db,
+        &id,
+        &format!(r#"{{"k":"/nonexistent/x","k":"{}"}}"#, f.display()),
+    );
+    let o = check(&db);
+    assert_cannot_determine(&o, "duplicate key, earlier path missing");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains(&id), "stderr must name {id}: {err}");
+}
+
+#[test]
+fn r3_duplicate_key_earlier_relative_is_undetermined_exit_2() {
+    let (d, db) = new_db();
+    let f = d.path().join("ok.glb");
+    std::fs::write(&f, b"x").unwrap();
+    let id = insert(&db, None, None);
+    set_asset_ref(
+        &db,
+        &id,
+        &format!(r#"{{"k":"relative","k":"{}"}}"#, f.display()),
+    );
+    let o = check(&db);
+    assert_cannot_determine(&o, "duplicate key, earlier relative");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains(&id), "stderr must name {id}: {err}");
+}
+
+fn non_utf8_case(update: &str, ctx: &str) {
+    let (_d, db) = new_db();
+    insert(&db, None, None);
+    sql(&db, update);
+    let o = check(&db);
+    assert_no_panic(&o, ctx);
+    assert_cannot_determine(&o, ctx);
+}
+
+#[test]
+fn non_utf8_id_is_undetermined_exit_2_not_panic() {
+    non_utf8_case(
+        "UPDATE records SET id = cast(x'ff41' as text)",
+        "non-utf8 id",
+    );
+}
+
+#[test]
+fn non_utf8_parent_id_is_undetermined_exit_2_not_panic() {
+    non_utf8_case(
+        "UPDATE records SET parent_id = cast(x'ff41' as text)",
+        "non-utf8 parent_id",
+    );
+}
+
+#[test]
+fn non_utf8_asset_ref_is_undetermined_exit_2_not_panic() {
+    non_utf8_case(
+        "UPDATE records SET asset_ref = cast(x'ff41' as text)",
+        "non-utf8 asset_ref",
+    );
+}
